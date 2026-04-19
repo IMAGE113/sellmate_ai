@@ -1,19 +1,44 @@
 import asyncpg
 import os
+import logging
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+logger = logging.getLogger(__name__)
+
+# Global pool variable
+pool = None 
 
 async def get_db_pool():
-    return await asyncpg.create_pool(DATABASE_URL)
+    global pool
+    if pool is None:
+        try:
+            # Render မှာ Neon သုံးရင် ssl='require' က မဖြစ်မနေလိုအပ်ပါတယ်
+            pool = await asyncpg.create_pool(
+                DATABASE_URL, 
+                ssl='require',
+                min_size=1,
+                max_size=10
+            )
+            logger.info("✅ Database pool initialized.")
+            
+            # Pool ဆောက်ပြီးတာနဲ့ Table တွေ ရှိမရှိ စစ်မယ်/ဆောက်မယ်
+            await init_db(pool)
+            
+        except Exception as e:
+            logger.error(f"❌ Database connection failed: {e}")
+            raise e
+    return pool
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        # --- အရေးကြီးသည် ---
-        # အောက်က line က table တွေကို အသစ်ပြန်ဆောက်ဖို့ အဟောင်းတွေကို ဖျက်ထုတ်တာပါ။
-        # တစ်ခါ Deploy ဖြစ်ပြီး Bot စာပြန်ပြီဆိုရင် ဒီ line ကို ပြန်ဖျက်ပေးပါ။
-        await conn.execute("DROP TABLE IF EXISTS orders, products, businesses CASCADE")
+        logger.info("🛠️ Initializing Database Tables...")
+        
+        # --- ⚠️ သတိပြုရန် ---
+        # အောက်က CASCADE line က table အဟောင်းတွေကို ဖျက်တာပါ။ 
+        # Production ရောက်လို့ data တွေ အရေးကြီးလာရင် ဒီ line ကို comment ပိတ်လိုက်ပါ (#)
+        await conn.execute("DROP TABLE IF EXISTS task_queue, orders, products, businesses CASCADE")
 
-        # 1. Shop/Business Table
+        # 1. Businesses (Shops) Table
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
@@ -47,3 +72,28 @@ async def init_db(pool):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         ''')
+
+        # 4. Task Queue Table (ဒါက Bot စာပြန်ဖို့အတွက် အဓိကပဲ)
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS task_queue (
+            id SERIAL PRIMARY KEY,
+            shop_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+            chat_id TEXT NOT NULL,
+            user_text TEXT,
+            request_hash TEXT UNIQUE,
+            status TEXT DEFAULT 'pending',
+            attempts INTEGER DEFAULT 0,
+            last_error TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        ''')
+        
+        # အစမ်းသုံးဖို့ Shop ID = 1 ကို တစ်ခါတည်း ထည့်ပေးထားမယ်
+        await conn.execute('''
+        INSERT INTO businesses (id, name, api_key) 
+        VALUES (1, 'Randy Cafe', 'default-key-123')
+        ON CONFLICT (id) DO NOTHING;
+        ''')
+        
+        logger.info("✅ All tables are ready.")
