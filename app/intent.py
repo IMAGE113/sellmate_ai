@@ -1,13 +1,12 @@
+# ai4burmese integration layer (REAL PLACE)
+
 def detect_intent(text: str):
-    t = text.lower()
+    text = text.lower()
 
-    if "မှာ" in t or "order" in t or "ဝယ်" in t:
-        return "order"
+    if "order" in text or "ဝယ်" in text:
+        return "ORDER"
 
-    if "stock" in t:
-        return "stock"
+    if "stock" in text:
+        return "STOCK"
 
-    if "price" in t:
-        return "price"
-
-    return "chat"
+    return "CHAT"
