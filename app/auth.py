@@ -1,4 +1,4 @@
-importimport secrets
+import secrets
 
 def generate_api_key():
-    return "sk_" + secrets.token_urlsafe(32)
+    return f"sk_{secrets.token_urlsafe(24)}"
