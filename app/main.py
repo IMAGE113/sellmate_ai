@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from .database import get_db_pool, init_db
 from .worker import run_worker
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def start_worker_thread():
@@ -24,30 +24,34 @@ async def lifespan(app: FastAPI):
     await init_db(app.state.pool)
     worker_thread = threading.Thread(target=start_worker_thread, daemon=True)
     worker_thread.start()
-    logger.info("🚀 System fully online.")
+    logger.info("🚀 SaaS Webhook & Worker Started.")
     yield
     if hasattr(app.state, "pool"):
         await app.state.pool.close()
 
 app = FastAPI(lifespan=lifespan)
 
-@app.get("/")
-async def root(): return {"status": "ok"}
-
 @app.post("/webhook/telegram")
 async def telegram_webhook(req: Request):
     try:
         data = await req.json()
         msg = data.get("message", {})
-        text, chat_id, message_id = msg.get("text"), msg.get("chat", {}).get("id"), msg.get("message_id")
+        text = msg.get("text")
+        chat_id = str(msg.get("chat", {}).get("id"))
+        message_id = msg.get("message_id")
 
         if text and chat_id:
             req_hash = hashlib.md5(f"{chat_id}:{message_id}".encode()).hexdigest()
             async with app.state.pool.acquire() as conn:
+                # မှတ်ချက် - လက်တွေ့မှာ bot_token ပေါ်မူတည်ပြီး business_id ကို ရှာရမှာပါ
+                # လောလောဆယ် ID = 1 လို့ပဲ ထားထားပါတယ်
                 await conn.execute(
-                    "INSERT INTO task_queue (shop_id, chat_id, user_text, request_hash) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
-                    1, str(chat_id), text, req_hash
+                    "INSERT INTO task_queue (business_id, chat_id, user_text, request_hash) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+                    1, chat_id, text, req_hash
                 )
     except Exception as e:
-        logger.error(f"❌ Webhook Error: {e}")
+        logger.error(f"Webhook Error: {e}")
     return {"ok": True}
+
+@app.get("/")
+async def root(): return {"status": "SaaS Running"}
