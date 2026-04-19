@@ -5,10 +5,10 @@ from google import genai
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 SYSTEM_PROMPT = """
-You are a sales assistant. Extract items and quantities from the user text.
+You are an AI sales assistant. Extract item name and quantity.
 Return JSON ONLY:
 {"intent": "order", "items": [{"name": "item_name", "qty": 1}]}
-If not an order, return {"intent": "chat", "items": []}
+If the user is just greeting, return {"intent": "chat", "items": []}
 """
 
 def parse_order(text: str):
