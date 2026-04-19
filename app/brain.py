@@ -1,27 +1,26 @@
-from .ai import get_chat
 from .intent import detect_intent
-
-chat_store = {}
-
-def get_session(chat_id: str):
-    if chat_id not in chat_store:
-        chat_store[chat_id] = get_chat()
-    return chat_store[chat_id]
+from .ai import ask_ai
 
 
-async def handle_message(chat_id: str, text: str, db_pool):
+async def process_message(text: str):
+
+    ai = await ask_ai(text)
+
+    # AI4BURMESE FLOW
+    if ai.get("source") == "ai4burmese":
+        intent = ai["result"].get("intent")
+
+        if intent == "order":
+            return {
+                "type": "order_flow",
+                "engine": "ai4burmese"
+            }
+
+    # NORMAL FLOW
     intent = detect_intent(text)
-    chat = get_session(chat_id)
 
-    # ORDER FLOW
-    if intent == "ORDER":
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO orders (chat_id, message) VALUES ($1, $2)",
-                chat_id, text
-            )
-        return "အော်ဒါလက်ခံပြီးပါပြီ ✅"
-
-    # CHAT FLOW
-    response = chat.send_message(text)
-    return response.text
+    return {
+        "type": "chat",
+        "intent": intent,
+        "ai": ai
+    }
