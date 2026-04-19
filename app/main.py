@@ -75,3 +75,22 @@ async def webhook(req: Request):
             await send_tg(chat_id, "ဘာများ မှာယူချင်ပါသလဲရှင်?")
 
     return {"ok": True}
+
+
+# ai.py ထဲက parse_order ရဲ့ output ကို log ထုတ်ကြည့်မယ်
+        ai = parse_order(text)
+        print(f"AI Output: {ai}") # Render log မှာ သွားကြည့်လို့ရအောင်
+
+        if ai["intent"] == "order":
+            business = await conn.fetchrow("SELECT id FROM businesses WHERE admin_chat_id = $1", chat_id)
+            
+            if business:
+                # အော်ဒါကို Database ထဲ ထည့်မယ်
+                await conn.execute(
+                    "INSERT INTO orders (business_id, items, status) VALUES ($1, $2, $3)",
+                    business['id'], json.dumps(ai["items"]), "PENDING"
+                )
+                # Customer ကို အတည်ပြုချက် ပြန်ပို့မယ်
+                order_summary = ", ".join([f"{i['name']} ({i['qty']})" for i in ai['items']])
+                await send_tg(chat_id, f"🛒 အော်ဒါမှတ်သားပြီးပါပြီ- {order_summary}")
+                return {"ok": True}
