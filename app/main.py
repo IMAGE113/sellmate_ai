@@ -26,7 +26,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "SellMate AI Running"}
+    return {"message": "SellMate AI is live"}
 
 @app.post("/webhook/telegram")
 async def webhook(req: Request):
@@ -38,41 +38,40 @@ async def webhook(req: Request):
     if not text: return {"ok": True}
 
     async with app.state.pool.acquire() as conn:
-        # 1. Shop Registration Flow
+        # 1. Register Shop (Dashboard Access အတွက် API Key ထုတ်ပေးမယ်)
         if text.startswith("/start"):
-            shop_name = text.replace("/start", "").strip() or "Randy's Cafe"
-            key = generate_api_key()
+            shop_name = text.replace("/start", "").strip() or "New Shop"
+            api_key = generate_api_key()
             
-            # Chat ID တူတာ ရှိမရှိ စစ်မယ်
-            existing = await conn.fetchrow("SELECT api_key FROM businesses WHERE admin_chat_id = $1", chat_id)
+            # အရင်ရှိပြီးသားလား စစ်မယ်
+            biz = await conn.fetchrow("SELECT api_key FROM businesses WHERE admin_chat_id = $1", chat_id)
             
-            if not existing:
+            if not biz:
                 await conn.execute(
                     "INSERT INTO businesses (name, api_key, admin_chat_id) VALUES ($1,$2,$3)",
-                    shop_name, key, chat_id
+                    shop_name, api_key, chat_id
                 )
-                await send_tg(chat_id, f"✅ {shop_name} Registered!\n\nYour API Key: `{key}`\n(Keep this for your Dashboard login!)")
+                await send_tg(chat_id, f"✅ {shop_name} ကို Register လုပ်ပြီးပါပြီ။\n\nDashboard Login API Key:\n`{api_key}`")
             else:
-                await send_tg(chat_id, f"You are already registered.\nYour API Key: `{existing['api_key']}`")
+                await send_tg(chat_id, f"ဒီ Bot က Register လုပ်ပြီးသားပါ။\nAPI Key: `{biz['api_key']}`")
             return {"ok": True}
 
-        # 2. AI Order Parsing Logic
+        # 2. AI Parsing & Database Storage (Multi-shop aware)
         ai = parse_order(text)
         
-        if ai["intent"] == "order":
-            # ဘယ်ဆိုင်အတွက်လဲဆိုတာ chat_id နဲ့ ရှာမယ်
-            business = await conn.fetchrow("SELECT id FROM businesses WHERE admin_chat_id = $1", chat_id)
-            
-            if business:
-                bid = business['id']
-                await conn.execute(
-                    "INSERT INTO orders (business_id, items, total, status) VALUES ($1, $2, $3, $4)",
-                    bid, json.dumps(ai["items"]), 0, "PENDING"
-                )
-                await send_tg(chat_id, f"🛒 အော်ဒါလက်ခံရရှိပါပြီ- {ai['items']}")
-            else:
-                await send_tg(chat_id, "ကျေးဇူးပြု၍ /start [ဆိုင်နာမည်] အရင်ရိုက်ပေးပါ။")
+        # ဘယ်ဆိုင်ကလဲဆိုတာ chat_id နဲ့ အရင်ရှာ
+        business = await conn.fetchrow("SELECT id FROM businesses WHERE admin_chat_id = $1", chat_id)
+        
+        if ai["intent"] == "order" and business:
+            await conn.execute(
+                "INSERT INTO orders (business_id, items, status) VALUES ($1, $2, $3)",
+                business['id'], json.dumps(ai["items"]), "PENDING"
+            )
+            await send_tg(chat_id, f"🛒 အော်ဒါမှတ်သားပြီးပါပြီ- {ai['items']}")
+        
+        elif not business:
+            await send_tg(chat_id, "ကျေးဇူးပြု၍ /start [ဆိုင်နာမည်] အရင်လုပ်ပေးပါ။")
         else:
-            await send_tg(chat_id, "မင်္ဂလာပါရှင်၊ ဘာမှာယူချင်ပါသလဲ?")
+            await send_tg(chat_id, "ဘာများ မှာယူချင်ပါသလဲရှင်?")
 
     return {"ok": True}
