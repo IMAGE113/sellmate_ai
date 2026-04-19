@@ -3,3 +3,5 @@ uvicorn
 asyncpg
 python-dotenv
 pydantic
+httpx
+google-generativeai
