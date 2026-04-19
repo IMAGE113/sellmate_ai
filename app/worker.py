@@ -1,5 +1,4 @@
 import asyncio
-import time
 import logging
 import httpx
 import os
@@ -15,22 +14,16 @@ async def send_tg(chat_id, text):
         try:
             res = await client.post(url, json={"chat_id": chat_id, "text": text})
             return res.status_code == 200
-        except Exception as e:
-            logger.error(f"❌ TG Send Error: {e}")
-            return False
+        except: return False
 
 async def run_worker():
-    # ၁။ စနစ်တစ်ခုလုံး တည်ငြိမ်အောင် ခေတ္တစောင့်မယ်
     await asyncio.sleep(8)
-    
-    # ၂။ Worker အတွက် သီးသန့် Pool ယူမယ်
     pool = await get_db_pool(for_worker=True)
-    logger.info("✅ Worker monitoring queue with private pool...")
+    logger.info("✅ Worker is monitoring the queue...")
 
     while True:
         try:
             async with pool.acquire() as conn:
-                # ၃။ Task တစ်ခုဆွဲယူမယ်
                 task = await conn.fetchrow("""
                     UPDATE task_queue SET status='processing', updated_at=NOW()
                     WHERE id = (SELECT id FROM task_queue WHERE status='pending' 
@@ -41,16 +34,25 @@ async def run_worker():
                 if task:
                     chat_id = task['chat_id']
                     try:
-                        # AI ဆီပို့မယ်
                         res_json, model = await ai_service.get_order_json(task['user_text'])
                         
-                        # Telegram ဆီပို့မယ်
-                        reply = f"✅ အော်ဒါအသေးစိတ်:\n{res_json}"
+                        # AI Response ထဲက Data တွေကို စာသားအဖြစ် ပြောင်းမယ်
+                        order_info = res_json.get('order', {}) if res_json else None
+                        
+                        if order_info and order_info != "None":
+                            items = order_info.get('items', [])
+                            if items:
+                                items_text = "\n".join([f"✨ {i.get('name')} - {i.get('quantity', 1)} ခု" for i in items])
+                                reply = f"✅ အော်ဒါမှတ်သားပြီးပါပြီခင်ဗျာ!\n\nမှာယူထားသည်များ -\n{items_text}\n\nစုစုပေါင်း - {order_info.get('total', 0)} Ks\n\nခေတ္တစောင့်ဆိုင်းပေးပါဦး။"
+                            else:
+                                reply = "မင်္ဂလာပါ! Randy's Cafe က ကြိုဆိုပါတယ်။ ဘာများ မှာယူချင်ပါသလဲ ခင်ဗျာ?"
+                        else:
+                            reply = "မင်္ဂလာပါ! အော်ဒါမှာယူလိုပါက ပစ္စည်းအမည်နဲ့ အရေအတွက်ကို ပြောပေးပါခင်ဗျာ။"
+
                         if await send_tg(chat_id, reply):
                             await conn.execute("UPDATE task_queue SET status='completed' WHERE id=$1", task['id'])
-                            logger.info(f"✅ Completed Task {task['id']}")
                     except Exception as e:
-                        logger.error(f"❌ Task Processing Error: {e}")
+                        logger.error(f"❌ Processing Error: {e}")
                         await conn.execute("UPDATE task_queue SET status='pending', attempts=attempts+1 WHERE id=$1", task['id'])
 
             await asyncio.sleep(3)
