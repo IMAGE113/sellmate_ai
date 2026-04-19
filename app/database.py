@@ -12,7 +12,7 @@ async def get_db_pool():
     global pool
     if pool is None:
         try:
-            # Render မှာ Neon သုံးရင် ssl='require' က မဖြစ်မနေလိုအပ်ပါတယ်
+            # SSL 'require' က Render/Neon အတွက် မဖြစ်မနေလိုအပ်ပါတယ်
             pool = await asyncpg.create_pool(
                 DATABASE_URL, 
                 ssl='require',
@@ -20,25 +20,20 @@ async def get_db_pool():
                 max_size=10
             )
             logger.info("✅ Database pool initialized.")
-            
-            # Pool ဆောက်ပြီးတာနဲ့ Table တွေ ရှိမရှိ စစ်မယ်/ဆောက်မယ်
-            await init_db(pool)
-            
         except Exception as e:
             logger.error(f"❌ Database connection failed: {e}")
             raise e
     return pool
 
-async def init_db(pool):
-    async with pool.acquire() as conn:
+async def init_db(db_pool):
+    """Table တွေကို စနစ်တကျ အစီအစဉ်တိုင်း ဆောက်ပေးမယ့် function"""
+    async with db_pool.acquire() as conn:
         logger.info("🛠️ Initializing Database Tables...")
         
-        # --- ⚠️ သတိပြုရန် ---
-        # အောက်က CASCADE line က table အဟောင်းတွေကို ဖျက်တာပါ။ 
-        # Production ရောက်လို့ data တွေ အရေးကြီးလာရင် ဒီ line ကို comment ပိတ်လိုက်ပါ (#)
+        # ⚠️ အောက်က line က table အဟောင်းတွေကို ဖျက်တာပါ။ (Data တွေရှိလာရင် comment ပိတ်ထားပါ)
         await conn.execute("DROP TABLE IF EXISTS task_queue, orders, products, businesses CASCADE")
 
-        # 1. Businesses (Shops) Table
+        # 1. Businesses Table
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
@@ -49,7 +44,7 @@ async def init_db(pool):
         );
         ''')
 
-        # 2. Products (Inventory) Table
+        # 2. Products Table
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
@@ -73,7 +68,7 @@ async def init_db(pool):
         );
         ''')
 
-        # 4. Task Queue Table (ဒါက Bot စာပြန်ဖို့အတွက် အဓိကပဲ)
+        # 4. Task Queue Table (Worker အတွက် အသက်သွေးကြော)
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS task_queue (
             id SERIAL PRIMARY KEY,
@@ -89,11 +84,10 @@ async def init_db(pool):
         );
         ''')
         
-        # အစမ်းသုံးဖို့ Shop ID = 1 ကို တစ်ခါတည်း ထည့်ပေးထားမယ်
+        # Default Shop ID = 1 ကို ထည့်သွင်းမယ် (ForeignKey Error မတက်အောင်)
         await conn.execute('''
-        INSERT INTO businesses (id, name, api_key) 
-        VALUES (1, 'Randy Cafe', 'default-key-123')
+        INSERT INTO businesses (id, name) VALUES (1, 'Randy Cafe')
         ON CONFLICT (id) DO NOTHING;
         ''')
         
-        logger.info("✅ All tables are ready.")
+        logger.info("✅ All Database Tables are ready.")
