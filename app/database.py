@@ -3,54 +3,44 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+
 async def get_db_pool():
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL is missing in environment variables")
+
     return await asyncpg.create_pool(DATABASE_URL)
+
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        await conn.execute('''
-
-        -- 🏢 Businesses (Tenants)
+        await conn.execute("""
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
-            name VARCHAR(100) NOT NULL,
-            api_key VARCHAR(255) UNIQUE,
+            name TEXT NOT NULL,
+            api_key TEXT UNIQUE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
-        -- 📦 Products
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
-            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
-            name VARCHAR(100) NOT NULL,
-            price REAL NOT NULL,
-            stock INTEGER DEFAULT 0,
-            code VARCHAR(20) UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            business_id INT REFERENCES businesses(id),
+            name TEXT NOT NULL,
+            price FLOAT NOT NULL,
+            stock INT DEFAULT 0,
+            code TEXT
         );
 
-        -- 🧾 Orders (State Machine Ready)
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
-            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
-            product_id INTEGER REFERENCES products(id),
-            qty INTEGER NOT NULL,
-            total REAL NOT NULL,
-            payment_type VARCHAR(20),
-            status VARCHAR(30) DEFAULT 'PENDING_CONFIRMATION',
+            business_id INT REFERENCES businesses(id),
+            product_id INT,
+            qty INT,
+            total FLOAT,
+            status TEXT DEFAULT 'PENDING',
+            payment_type TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-
-        -- 💬 Conversations (AI Chatbot Memory)
-        CREATE TABLE IF NOT EXISTS conversations (
-            id SERIAL PRIMARY KEY,
-            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
-            user_id VARCHAR(100),
-            current_step VARCHAR(50),
-            data JSONB,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-
-        ''')
+        """)
