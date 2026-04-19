@@ -20,17 +20,11 @@ def start_worker_thread():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ၁။ Web Service အတွက် Pool ယူမယ်
     app.state.pool = await get_db_pool(for_worker=False)
-    
-    # ၂။ Table initialization အရင်လုပ်မယ်
     await init_db(app.state.pool)
-    
-    # ၃။ ပြီးမှ Worker Thread ကို စမယ်
     worker_thread = threading.Thread(target=start_worker_thread, daemon=True)
     worker_thread.start()
-    logger.info("🚀 System fully online with Dual Pool Mode.")
-
+    logger.info("🚀 System fully online.")
     yield
     if hasattr(app.state, "pool"):
         await app.state.pool.close()
@@ -38,17 +32,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
-async def root():
-    return {"status": "ok", "message": "Sellmate AI is running"}
+async def root(): return {"status": "ok"}
 
 @app.post("/webhook/telegram")
 async def telegram_webhook(req: Request):
     try:
         data = await req.json()
         msg = data.get("message", {})
-        text = msg.get("text")
-        chat_id = msg.get("chat", {}).get("id")
-        message_id = msg.get("message_id")
+        text, chat_id, message_id = msg.get("text"), msg.get("chat", {}).get("id"), msg.get("message_id")
 
         if text and chat_id:
             req_hash = hashlib.md5(f"{chat_id}:{message_id}".encode()).hexdigest()
@@ -57,7 +48,6 @@ async def telegram_webhook(req: Request):
                     "INSERT INTO task_queue (shop_id, chat_id, user_text, request_hash) VALUES ($1,$2,$3,$4) ON CONFLICT DO NOTHING",
                     1, str(chat_id), text, req_hash
                 )
-                logger.info(f"📥 Task Queued: {chat_id}")
     except Exception as e:
         logger.error(f"❌ Webhook Error: {e}")
     return {"ok": True}
