@@ -1,54 +1,47 @@
-import os
-import json
-import logging
-import httpx
+import os, json, time, httpx, logging
 from google import genai
-from google.genai import types
 
 logger = logging.getLogger(__name__)
 
-ORDER_KEYWORDS = ["ယူမယ်", "ဝယ်မယ်", "လိုချင်", "ပေးပါ", "မှာမယ်", "ရမလား", "ခွက်", "ဗူး", "ထုပ်", "ထုတ်"]
+class AIService:
+    def __init__(self):
+        self.gemini_healthy = True
+        self.last_error_time = 0
 
-def parse_order(text: str):
-    is_likely_order = any(k in text for k in ORDER_KEYWORDS)
-    
-    # --- 1. Try Gemini ---
-    try:
-        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=f"Extract order from: {text}. Return ONLY JSON: {{'intent': 'order/chat', 'items': [{{'name': '', 'qty': 1}}]}}",
-            config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.0)
-        )
-        return json.loads(response.text)
-    
-    except Exception as e:
-        logger.warning(f"Gemini Limit/Error: {e}. Trying Groq...")
-        
-        # --- 2. Try Groq (Llama 3 Backup) ---
+    async def get_order_json(self, text):
+        # 1. Gemini Health Check (Circuit Breaker)
+        if not self.gemini_healthy and (time.time() - self.last_error_time < 60):
+            return await self.call_groq(text)
+
+        # 2. Try Gemini
         try:
-            groq_key = os.getenv("GROQ_API_KEY")
-            if groq_key:
-                with httpx.Client() as client:
-                    resp = client.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {groq_key}"},
-                        json={
-                            "model": "llama-3.3-70b-versatile",
-                            "messages": [
-                                {"role": "system", "content": "You are a POS extractor. Output ONLY JSON: {'intent': 'order', 'items': [{'name': '', 'qty': 1}]}"},
-                                {"role": "user", "content": text}
-                            ],
-                            "response_format": {"type": "json_object"}
-                        }
-                    )
-                    groq_res = resp.json()
-                    return json.loads(groq_res['choices'][0]['message']['content'])
-        except Exception as groq_err:
-            logger.error(f"Groq failed: {groq_err}")
+            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=f"Extract order info into JSON: {text}. Output only JSON."
+            )
+            self.gemini_healthy = True
+            return json.loads(response.text), "gemini"
+        except Exception as e:
+            if "429" in str(e):
+                self.gemini_healthy = False
+                self.last_error_time = time.time()
+            return await self.call_groq(text)
 
-        # --- 3. Manual Fallback ---
-        if is_likely_order:
-            return {"intent": "order", "items": [{"name": text, "qty": 1}]}
-            
-        return {"intent": "chat", "items": []}
+    async def call_groq(self, text):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [{"role": "user", "content": f"Extract order JSON: {text}"}],
+                        "response_format": {"type": "json_object"}
+                    }
+                )
+                return json.loads(resp.json()['choices'][0]['message']['content']), "groq"
+        except:
+            return {"intent": "order", "items": [{"name": text, "qty": 1}]}, "fallback"
+
+ai_service = AIService()
