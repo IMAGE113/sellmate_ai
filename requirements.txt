@@ -1,7 +1,19 @@
+# --- Core Web Framework ---
 fastapi
-uvicorn
+uvicorn[standard]
+
+# --- AI & HTTP Clients ---
 google-genai
 httpx
-psycopg2-binary  # သို့မဟုတ် asyncpg (Postgres connection အတွက်)
+groq
+
+# --- Database (Asynchronous Postgres) ---
+asyncpg
+
+# --- Configuration & Security ---
 python-dotenv
 pydantic-settings
+cryptography
+
+# --- Utilities ---
+pydantic
