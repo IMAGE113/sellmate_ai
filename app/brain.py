@@ -1,24 +1,27 @@
+from .ai import get_chat
 from .intent import detect_intent
-from .ai import ask_gemini
 
-def process_message(text: str):
+chat_store = {}
 
+def get_session(chat_id: str):
+    if chat_id not in chat_store:
+        chat_store[chat_id] = get_chat()
+    return chat_store[chat_id]
+
+
+async def handle_message(chat_id: str, text: str, db_pool):
     intent = detect_intent(text)
+    chat = get_session(chat_id)
 
-    # 1. ORDER FLOW
+    # ORDER FLOW
     if intent == "ORDER":
-        prompt = f"""
-You are SellMate AI order system.
-Extract product name and quantity.
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO orders (chat_id, message) VALUES ($1, $2)",
+                chat_id, text
+            )
+        return "အော်ဒါလက်ခံပြီးပါပြီ ✅"
 
-User: {text}
-Return structured JSON only.
-"""
-        return ask_gemini(prompt)
-
-    # 2. QUERY FLOW
-    if intent == "QUERY":
-        return "ဈေးနှုန်းစနစ်ကို စစ်ပေးမယ်"
-
-    # 3. CHAT FLOW
-    return ask_gemini(text)
+    # CHAT FLOW
+    response = chat.send_message(text)
+    return response.text
