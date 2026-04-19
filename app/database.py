@@ -2,36 +2,60 @@ import asyncpg
 import os
 import logging
 
+# DATABASE_URL ကို Environment ကနေ ယူမယ်
 DATABASE_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger(__name__)
 
-# Global pool variable
-pool = None 
+# Pool တွေကို Global သတ်မှတ်မယ် (Web နဲ့ Worker အတွက် ခွဲထားတာပါ)
+web_pool = None 
+worker_pool = None
 
-async def get_db_pool():
-    global pool
-    if pool is None:
-        try:
-            # SSL 'require' က Render/Neon အတွက် မဖြစ်မနေလိုအပ်ပါတယ်
-            pool = await asyncpg.create_pool(
-                DATABASE_URL, 
-                ssl='require',
-                min_size=1,
-                max_size=10
-            )
-            logger.info("✅ Database pool initialized.")
-        except Exception as e:
-            logger.error(f"❌ Database connection failed: {e}")
-            raise e
-    return pool
+async def get_db_pool(for_worker=False):
+    """
+    Web Service နဲ့ Worker Thread ကြားမှာ Connection လုမသုံးမိအောင် 
+    Pool သီးသန့်စီ ခွဲထုတ်ပေးတဲ့ Function
+    """
+    global web_pool, worker_pool
+    
+    if for_worker:
+        if worker_pool is None:
+            try:
+                worker_pool = await asyncpg.create_pool(
+                    DATABASE_URL, 
+                    ssl='require',
+                    min_size=1,
+                    max_size=5  # Worker အတွက် connection ၅ ခုစာ သီးသန့်ဖယ်မယ်
+                )
+                logger.info("✅ Worker DB Pool Created.")
+            except Exception as e:
+                logger.error(f"❌ Worker Pool failed: {e}")
+                raise e
+        return worker_pool
+    else:
+        if web_pool is None:
+            try:
+                web_pool = await asyncpg.create_pool(
+                    DATABASE_URL, 
+                    ssl='require',
+                    min_size=1,
+                    max_size=5  # Webhook အတွက် connection ၅ ခုစာ သီးသန့်ဖယ်မယ်
+                )
+                logger.info("✅ Web DB Pool Created.")
+            except Exception as e:
+                logger.error(f"❌ Web Pool failed: {e}")
+                raise e
+        return web_pool
 
-async def init_db(db_pool):
-    """Table တွေကို စနစ်တကျ အစီအစဉ်တိုင်း ဆောက်ပေးမယ့် function"""
-    async with db_pool.acquire() as conn:
-        logger.info("🛠️ Initializing Database Tables...")
+async def init_db(pool):
+    """
+    Startup မှာ Table တွေ ရှိမရှိ စစ်မယ်၊ မရှိရင် ဆောက်မယ်။
+    Main.py က lifespan ထဲမှာ တစ်ကြိမ်ပဲ ခေါ်ရပါမယ်။
+    """
+    async with pool.acquire() as conn:
+        logger.info("🛠️ Checking/Initializing Database Tables...")
         
-        # ⚠️ အောက်က line က table အဟောင်းတွေကို ဖျက်တာပါ။ (Data တွေရှိလာရင် comment ပိတ်ထားပါ)
-        await conn.execute("DROP TABLE IF EXISTS task_queue, orders, products, businesses CASCADE")
+        # --- ⚠️ CASCADE Table Cleanup (Testing အတွက်ပဲ သုံးပါ) ---
+        # await conn.execute("DROP TABLE IF EXISTS task_queue, orders, products, businesses CASCADE")
 
         # 1. Businesses Table
         await conn.execute('''
@@ -68,7 +92,7 @@ async def init_db(db_pool):
         );
         ''')
 
-        # 4. Task Queue Table (Worker အတွက် အသက်သွေးကြော)
+        # 4. Task Queue Table (Worker အတွက် အဓိက)
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS task_queue (
             id SERIAL PRIMARY KEY,
@@ -84,10 +108,10 @@ async def init_db(db_pool):
         );
         ''')
         
-        # Default Shop ID = 1 ကို ထည့်သွင်းမယ် (ForeignKey Error မတက်အောင်)
+        # အစမ်းသုံးဖို့ Shop ID = 1 ကို တစ်ခါတည်း ထည့်ပေးထားမယ်
         await conn.execute('''
         INSERT INTO businesses (id, name) VALUES (1, 'Randy Cafe')
         ON CONFLICT (id) DO NOTHING;
         ''')
         
-        logger.info("✅ All Database Tables are ready.")
+        logger.info("✅ Database Initialization Complete.")
