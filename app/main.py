@@ -26,7 +26,7 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"status": "SellMate AI is running"}
+    return {"status": "SellMate AI is online"}
 
 @app.post("/webhook/telegram")
 async def webhook(req: Request):
@@ -43,7 +43,7 @@ async def webhook(req: Request):
         return {"ok": True}
 
     async with app.state.pool.acquire() as conn:
-        # 1. Registration Logic
+        # 1. Register ဆိုင်မှတ်ပုံတင်ခြင်း
         if text.startswith("/start"):
             shop_name = text.replace("/start", "").strip() or "My Shop"
             api_key = generate_api_key()
@@ -55,9 +55,9 @@ async def webhook(req: Request):
                     "INSERT INTO businesses (name, api_key, admin_chat_id) VALUES ($1,$2,$3)",
                     shop_name, api_key, chat_id
                 )
-                await send_tg(chat_id, f"✅ *{shop_name}* Registered!\n\nDashboard Login API Key:\n`{api_key}`")
+                await send_tg(chat_id, f"✅ *{shop_name}* Registered!\n\nDashboard API Key:\n`{api_key}`")
             else:
-                await send_tg(chat_id, f"ဒီ Bot က Register လုပ်ပြီးသားပါ။\nYour API Key: `{existing['api_key']}`")
+                await send_tg(chat_id, f"ဒီ Bot က Register လုပ်ပြီးသားပါ။\nAPI Key: `{existing['api_key']}`")
             return {"ok": True}
 
         # 2. AI Processing
@@ -69,20 +69,17 @@ async def webhook(req: Request):
             await send_tg(chat_id, "ကျေးဇူးပြု၍ `/start [ဆိုင်နာမည်]` အရင်လုပ်ပေးပါ။")
             return {"ok": True}
 
-        # Safety Check: intent က chat ဖြစ်နေရင်တောင် items ပါလာရင် order အဖြစ် ယူဆမယ်
-        is_order = ai_res.get("intent") == "order" or (len(ai_res.get("items", [])) > 0)
-
-        if is_order and ai_res.get("items"):
-            items_list = ai_res["items"]
-            
-            # Save to Database
+        # Safety: items စာရင်းပါရင် order လို့ သတ်မှတ်မယ်
+        items = ai_res.get("items", [])
+        if (ai_res.get("intent") == "order" or len(items) > 0) and items:
+            # Database ထဲ သိမ်းမယ်
             await conn.execute(
                 "INSERT INTO orders (business_id, items, status) VALUES ($1, $2, $3)",
-                business['id'], json.dumps(items_list), "PENDING"
+                business['id'], json.dumps(items), "PENDING"
             )
             
-            summary = "\n".join([f"• {i['name']} - {i['qty']} ခု" for i in items_list])
-            await send_tg(chat_id, f"🛒 *အော်ဒါလက်ခံရရှိပါပြီ!*\n\n{summary}\n\nအော်ဒါအခြေအနေကို Dashboard မှာ ကြည့်နိုင်ပါတယ်။")
+            summary = "\n".join([f"• {i['name']} - {i['qty']} ခု" for i in items])
+            await send_tg(chat_id, f"🛒 *အော်ဒါလက်ခံရရှိပါပြီ!*\n\n{summary}\n\nDashboard မှာ စစ်ဆေးနိုင်ပါတယ်။")
         else:
             await send_tg(chat_id, "မင်္ဂလာပါရှင်၊ ဘာများ မှာယူချင်ပါသလဲ? (ဥပမာ- Coffee ၂ ခွက်ပေးပါ)")
 
