@@ -12,24 +12,32 @@ async def get_db_pool(for_worker=False):
     global web_pool, worker_pool
     if for_worker:
         if worker_pool is None:
-            worker_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require', min_size=1, max_size=5)
+            worker_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require', min_size=1, max_size=10)
         return worker_pool
     else:
         if web_pool is None:
-            web_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require', min_size=1, max_size=5)
+            web_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require', min_size=1, max_size=10)
         return web_pool
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        logger.info("🛠️ Initializing Updated Tables...")
-        # Businesses
-        await conn.execute('CREATE TABLE IF NOT EXISTS businesses (id SERIAL PRIMARY KEY, name TEXT);')
+        logger.info("🛠️ Initializing SaaS Database Tables...")
         
-        # Products (Menu & Stock Control)
+        # ၁။ ဆိုင်ရှင်များဇယား
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS businesses (
+            id SERIAL PRIMARY KEY,
+            shop_name TEXT NOT NULL,
+            owner_chat_id TEXT, 
+            is_active BOOLEAN DEFAULT TRUE
+        );
+        ''')
+
+        # ၂။ ဆိုင်အလိုက် Menu (SaaS Dashboard မှ ထိန်းချုပ်ရန်)
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
-            business_id INTEGER DEFAULT 1,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             price REAL NOT NULL,
             stock INTEGER DEFAULT 0,
@@ -37,27 +45,36 @@ async def init_db(pool):
         );
         ''')
 
-        # Orders (Dashboard အတွက် အသေးစိတ်)
+        # ၃။ အော်ဒါများဇယား (Dashboard မှ ကြည့်ရန်)
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             customer_name TEXT,
             phone_no TEXT,
             address TEXT,
             items JSONB,
             total_price REAL,
-            payment_type TEXT, -- COD or Preorder
-            status TEXT DEFAULT 'PENDING', -- PENDING, SHIPPED, COMPLETED
+            payment_type TEXT,
+            status TEXT DEFAULT 'PENDING',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         ''')
 
-        # Task Queue
+        # ၄။ Task Queue
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS task_queue (
-            id SERIAL PRIMARY KEY, chat_id TEXT NOT NULL, user_text TEXT, 
-            request_hash TEXT UNIQUE, status TEXT DEFAULT 'pending', 
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id),
+            chat_id TEXT NOT NULL,
+            user_text TEXT,
+            request_hash TEXT UNIQUE,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         ''')
-        logger.info("✅ Database Structure Updated.")
+        
+        # အစမ်းသုံးရန် ဆိုင်တစ်ဆိုင် ထည့်ထားပေးခြင်း
+        await conn.execute("INSERT INTO businesses (id, shop_name) VALUES (1, 'Randy Cafe') ON CONFLICT (id) DO NOTHING;")
+        logger.info("✅ SaaS Database Ready.")
