@@ -1,5 +1,17 @@
 from pydantic import BaseModel
 
-class Message(BaseModel):
-    chat_id: str
-    text: str
+
+class BusinessCreate(BaseModel):
+    name: str
+
+
+class ProductCreate(BaseModel):
+    name: str
+    price: float
+    stock: int
+
+
+class OrderCreate(BaseModel):
+    product_id: int
+    qty: int
+    total: float
