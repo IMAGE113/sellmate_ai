@@ -23,9 +23,16 @@ async def init_db(pool):
     async with pool.acquire() as conn:
         logger.info("🛠️ Initializing SaaS Database Tables...")
         
+        # ⚠️ အရေးကြီး - Column Error တက်နေလို့ Table အဟောင်းတွေကို အရင်ဖျက်မယ်
+        # တစ်ခါ အောင်မြင်သွားရင် ဒီ DROP lines တွေကို ပြန်ဖျက်လို့ရပါတယ်
+        await conn.execute("DROP TABLE IF EXISTS task_queue CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS orders CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS products CASCADE;")
+        await conn.execute("DROP TABLE IF EXISTS businesses CASCADE;")
+
         # ၁။ ဆိုင်ရှင်များဇယား
         await conn.execute('''
-        CREATE TABLE IF NOT EXISTS businesses (
+        CREATE TABLE businesses (
             id SERIAL PRIMARY KEY,
             shop_name TEXT NOT NULL,
             owner_chat_id TEXT, 
@@ -33,9 +40,9 @@ async def init_db(pool):
         );
         ''')
 
-        # ၂။ ဆိုင်အလိုက် Menu (SaaS Dashboard မှ ထိန်းချုပ်ရန်)
+        # ၂။ ဆိုင်အလိုက် Menu
         await conn.execute('''
-        CREATE TABLE IF NOT EXISTS products (
+        CREATE TABLE products (
             id SERIAL PRIMARY KEY,
             business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
@@ -45,9 +52,9 @@ async def init_db(pool):
         );
         ''')
 
-        # ၃။ အော်ဒါများဇယား (Dashboard မှ ကြည့်ရန်)
+        # ၃။ အော်ဒါများဇယား
         await conn.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
+        CREATE TABLE orders (
             id SERIAL PRIMARY KEY,
             business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             customer_name TEXT,
@@ -63,7 +70,7 @@ async def init_db(pool):
 
         # ၄။ Task Queue
         await conn.execute('''
-        CREATE TABLE IF NOT EXISTS task_queue (
+        CREATE TABLE task_queue (
             id SERIAL PRIMARY KEY,
             business_id INTEGER REFERENCES businesses(id),
             chat_id TEXT NOT NULL,
@@ -75,6 +82,6 @@ async def init_db(pool):
         );
         ''')
         
-        # အစမ်းသုံးရန် ဆိုင်တစ်ဆိုင် ထည့်ထားပေးခြင်း
-        await conn.execute("INSERT INTO businesses (id, shop_name) VALUES (1, 'Randy Cafe') ON CONFLICT (id) DO NOTHING;")
-        logger.info("✅ SaaS Database Ready.")
+        # Initial Data ထည့်မယ်
+        await conn.execute("INSERT INTO businesses (id, shop_name) VALUES (1, 'Randy Cafe');")
+        logger.info("✅ SaaS Database Tables Re-created Successfully.")
