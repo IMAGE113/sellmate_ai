@@ -60,30 +60,30 @@ async def webhook(req: Request):
                 await send_tg(chat_id, f"ဒီ Bot က Register လုပ်ပြီးသားပါ။\nYour API Key: `{existing['api_key']}`")
             return {"ok": True}
 
-        # 2. AI Parsing & Order Management
+        # 2. AI Parsing Logic
+        # ai_res က {'intent': 'order', 'items': [{'name': 'coffee', 'qty': 1}]} ပုံစံထွက်ရမယ်
         ai_res = parse_order(text)
-        
-        # ဆိုင်ရှိမရှိ အရင်စစ်မယ်
+        print(f"DEBUG - AI Result: {ai_res}") # Render Log မှာ ကြည့်ဖို့
+
         business = await conn.fetchrow("SELECT id FROM businesses WHERE admin_chat_id = $1", chat_id)
         
         if not business:
             await send_tg(chat_id, "ကျေးဇူးပြု၍ `/start [ဆိုင်နာမည်]` အရင်လုပ်ပေးပါ။")
             return {"ok": True}
 
-        if ai_res.get("intent") == "order" and ai_res.get("items"):
+        # Intent က order ဖြစ်ပြီး items ပါမှ Database ထဲ ထည့်မယ်
+        if isinstance(ai_res, dict) and ai_res.get("intent") == "order" and ai_res.get("items"):
             items_list = ai_res["items"]
-            # Database ထဲ သိမ်းမယ်
+            
             await conn.execute(
                 "INSERT INTO orders (business_id, items, status) VALUES ($1, $2, $3)",
                 business['id'], json.dumps(items_list), "PENDING"
             )
             
-            # Customer ဆီ Summary ပြန်ပို့မယ်
             summary = "\n".join([f"• {i['name']} - {i['qty']} ခု" for i in items_list])
-            await send_tg(chat_id, f"🛒 *အော်ဒါလက်ခံရရှိပါပြီ!*\n\n{summary}\n\nDashboard မှာ သွားရောက်စစ်ဆေးနိုင်ပါတယ်။")
-        
+            await send_tg(chat_id, f"🛒 *အော်ဒါလက်ခံရရှိပါပြီ!*\n\n{summary}\n\nDashboard မှာ စစ်ဆေးနိုင်ပါတယ်။")
         else:
-            # Order မဟုတ်ရင် သာမန်အတိုင်းပဲ ပြန်ဖြေမယ်
-            await send_tg(chat_id, "မင်္ဂလာပါရှင်၊ ဘာမှာယူချင်ပါသလဲ? (ဥပမာ- Coffee ၂ ခွက်ပေးပါ)")
+            # Order မဟုတ်ရင် Default Message ပြန်မယ်
+            await send_tg(chat_id, "မင်္ဂလာပါရှင်၊ ဘာများ မှာယူချင်ပါသလဲ? (ဥပမာ- Coffee ၁ ခွက်ပေးပါ)")
 
     return {"ok": True}
