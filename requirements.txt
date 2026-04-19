@@ -2,10 +2,6 @@ fastapi
 uvicorn
 asyncpg
 python-dotenv
-httpx
 pydantic
-aiosqlite
-
-# AI layers
-google-generativeai
-ai4burmese
+google-genai
+httpx
