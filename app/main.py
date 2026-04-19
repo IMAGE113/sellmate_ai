@@ -1,66 +1,81 @@
 import os
-import asyncio
 from fastapi import FastAPI, Request
-from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 import httpx
 
-from .database import connect_db, init_db
-from .brain import process_message
+from app.database import get_db_pool, init_db
+from app.ai import parse_order
+from app.auth import generate_api_key
 
-load_dotenv()
-
-app = FastAPI()
-
-telegram_queue = asyncio.Queue()
-
-
-# ---------------- TELEGRAM ----------------
-async def telegram_worker():
-    async with httpx.AsyncClient() as client:
-        while True:
-            chat_id, text = await telegram_queue.get()
-            try:
-                await client.post(
-                    f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage",
-                    json={"chat_id": chat_id, "text": text}
-                )
-            except:
-                pass
-
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
 async def send(chat_id, text):
-    await telegram_queue.put((chat_id, text))
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text}
+        )
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.pool = await get_db_pool()
+    await init_db(app.state.pool)
+    yield
+    await app.state.pool.close()
 
-# ---------------- STARTUP ----------------
-@app.on_event("startup")
-async def startup():
-    await connect_db()
-    await init_db()
-    asyncio.create_task(telegram_worker())
+app = FastAPI(lifespan=lifespan)
 
+@app.get("/")
+async def root():
+    return {"status":"running"}
 
-# ---------------- WEBHOOK ----------------
+# 👉 ADMIN REGISTER
 @app.post("/webhook")
 async def webhook(req: Request):
-
     data = await req.json()
-    msg = data.get("message", {})
 
+    msg = data.get("message", {})
     text = msg.get("text")
     chat_id = str(msg.get("chat", {}).get("id"))
 
     if not text:
-        return {"ok": True}
+        return {"ok":True}
 
-    reply = await process_message(chat_id, text)
+    # register shop
+    if text.startswith("/start"):
+        name = text.replace("/start","").strip()
 
-    await send(chat_id, reply)
+        key = generate_api_key()
 
-    return {"ok": True}
+        async with app.state.pool.acquire() as conn:
+            bid = await conn.fetchval(
+                "INSERT INTO businesses (name, api_key, admin_chat_id) VALUES ($1,$2,$3) RETURNING id",
+                name, key, chat_id
+            )
 
+        await send(chat_id, f"✅ {name} registered\nAPI KEY:\n{key}")
+        return {"ok":True}
 
-# ---------------- RUN ----------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    # AI parse
+    ai = parse_order(text)
+
+    if ai["intent"] == "order":
+        items = ai["items"]
+
+        async with app.state.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO orders (items, total) VALUES ($1,$2)",
+                items, 0
+            )
+
+            admin = await conn.fetchrow(
+                "SELECT admin_chat_id FROM businesses LIMIT 1"
+            )
+
+        await send(admin["admin_chat_id"], f"🛒 New Order: {items}")
+        await send(chat_id, "✅ Order received")
+
+    else:
+        await send(chat_id, "ဘာမှာယူချင်ပါသလဲရှင်?")
+
+    return {"ok":True}
