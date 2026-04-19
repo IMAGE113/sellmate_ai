@@ -3,5 +3,5 @@ uvicorn
 asyncpg
 python-dotenv
 pydantic
-google-genai
 httpx
+google-genai
