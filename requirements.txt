@@ -1,7 +1,7 @@
 fastapi
 uvicorn
-asyncpg
-python-dotenv
-pydantic
-httpx
 google-genai
+httpx
+psycopg2-binary  # သို့မဟုတ် asyncpg (Postgres connection အတွက်)
+python-dotenv
+pydantic-settings
