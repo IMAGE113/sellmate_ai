@@ -1,17 +1,17 @@
-from ai4burmese import Predictor
+from ai4burmese import IntentClassifier
 
-# model (ပိတောက် / Burmese intent model)
-predictor = Predictor(model="padauk")
+classifier = IntentClassifier(model="padauk")
 
 def detect_intent(text: str):
-    result = predictor.predict(text)
+    try:
+        return classifier.predict(text)
+    except:
+        text = text.lower()
 
-    """
-    expected output example:
-    {
-        "intent": "ORDER",
-        "confidence": 0.92
-    }
-    """
+        if "order" in text or "ဝယ်" in text:
+            return "ORDER"
 
-    return result.get("intent", "CHAT")
+        if "cancel" in text:
+            return "CANCEL"
+
+        return "CHAT"
