@@ -8,10 +8,12 @@ async def get_db_pool():
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        # Table structure တွေ ပြောင်းသွားလို့ error တက်နေရင် အောက်က line ကို တစ်ခါပဲ သုံးပြီး ပြန်ဖျက်ပါ
-        # await conn.execute("DROP TABLE IF EXISTS orders, products, businesses CASCADE")
+        # --- အရေးကြီးသည် ---
+        # အောက်က line က table တွေကို အသစ်ပြန်ဆောက်ဖို့ အဟောင်းတွေကို ဖျက်ထုတ်တာပါ။
+        # တစ်ခါ Deploy ဖြစ်ပြီး Bot စာပြန်ပြီဆိုရင် ဒီ line ကို ပြန်ဖျက်ပေးပါ။
+        await conn.execute("DROP TABLE IF EXISTS orders, products, businesses CASCADE")
 
-        # 1. Shop Owners
+        # 1. Shop/Business Table
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
@@ -22,7 +24,7 @@ async def init_db(pool):
         );
         ''')
 
-        # 2. Inventory (Dashboard Manage လုပ်မယ့်အပိုင်း)
+        # 2. Products (Inventory) Table
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
@@ -34,7 +36,7 @@ async def init_db(pool):
         );
         ''')
 
-        # 3. Orders
+        # 3. Orders Table
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
