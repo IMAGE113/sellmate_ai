@@ -1,32 +1,22 @@
-import asyncio
-import json
-import logging
-import httpx
-import os
+import asyncio, json, logging, os, httpx
 from .ai import ai_service
 from .database import get_db_pool
-
-logger = logging.getLogger(__name__)
 
 async def send_tg(chat_id, text):
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     async with httpx.AsyncClient() as client:
-        try:
-            await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
-            return True
-        except: return False
+        await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
 
 async def run_worker():
-    await asyncio.sleep(8)
+    await asyncio.sleep(5)
     pool = await get_db_pool(for_worker=True)
-    logger.info("🌐 Worker is monitoring SaaS queue...")
-
+    
     while True:
         try:
             async with pool.acquire() as conn:
                 task = await conn.fetchrow("""
-                    UPDATE task_queue SET status='processing', updated_at=NOW()
+                    UPDATE task_queue SET status='processing'
                     WHERE id = (SELECT id FROM task_queue WHERE status='pending' 
                                 ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
                     RETURNING *
@@ -34,39 +24,33 @@ async def run_worker():
 
                 if task:
                     biz_id, chat_id, user_text = task['business_id'], task['chat_id'], task['user_text']
-
-                    # ၁။ ဆိုင်အလိုက် Menu နှင့် နာမည်ကို ယူမယ်
+                    
+                    # ၁။ SaaS Data ဖတ်မယ်
                     shop = await conn.fetchrow("SELECT shop_name FROM businesses WHERE id=$1", biz_id)
                     products = await conn.fetch("SELECT name, price, stock FROM products WHERE business_id=$1 AND is_available=TRUE", biz_id)
                     
-                    # ၂။ AI ဆီပို့မယ် (Context အဖြစ် ဆိုင်နာမည်နှင့် Menu ပါထည့်ပေးမယ်)
-                    ai_res = await ai_service.process_chat(
-                        user_text=user_text,
-                        chat_id=chat_id,
-                        shop_name=shop['shop_name'],
-                        menu=[dict(p) for p in products]
-                    )
-
+                    # ၂။ AI ဆီပို့မယ်
+                    ai_res = await ai_service.process_chat(user_text, chat_id, shop['shop_name'], [dict(p) for p in products])
+                    
                     intent = ai_res.get("intent")
                     
-                    # ၃။ Logic ခွဲခြားခြင်း
+                    # ၃။ Confirmation & DB Logic
                     if intent == "confirm_order":
-                        summary = ai_res.get("order_summary")
-                        text = (f"<b>📋 {shop['shop_name']} - Order အတည်ပြုရန်</b>\n\n"
-                                f"👤 အမည်: {summary['name']}\n📞 ဖုန်း: {summary['phone']}\n"
-                                f"🏠 လိပ်စာ: {summary['address']}\n🛍️ ပစ္စည်း: {summary['items_text']}\n"
-                                f"💰 စုစုပေါင်း: {summary['total']} Ks\n\n"
-                                f"မှန်ကန်ပါက 'Confirm' ဟု ပြောပေးပါခင်ဗျာ။")
-                        await send_tg(chat_id, text)
+                        s = ai_res.get("order_summary")
+                        confirm_text = (f"<b>📋 {shop['shop_name']} - အော်ဒါအနှစ်ချုပ်</b>\n\n"
+                                      f"👤 အမည်: {s['name']}\n📞 ဖုန်း: {s['phone']}\n🏠 လိပ်စာ: {s['address']}\n"
+                                      f"🛍️ ပစ္စည်း: {s['items_text']}\n💰 စုစုပေါင်း: {s['total']} Ks\n\n"
+                                      f"အချက်အလက်မှန်ကန်လျှင် 'Confirm' ဟု ပြောပေးပါခင်ဗျာ။")
+                        await send_tg(chat_id, confirm_text)
 
                     elif intent == "save_to_db":
-                        data = ai_res.get("final_order_data")
+                        d = ai_res.get("final_order_data")
                         await conn.execute("""
                             INSERT INTO orders (business_id, customer_name, phone_no, address, items, total_price, payment_type)
                             VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        """, biz_id, data['name'], data['phone'], data['address'], json.dumps(data['items']), data['total'], data['payment'])
-                        await send_tg(chat_id, "✅ အော်ဒါတင်ပြီးပါပြီ။ ကျေးဇူးတင်ပါတယ်!")
-
+                        """, biz_id, d['name'], d['phone'], d['address'], json.dumps(d['items']), d['total'], d['payment'])
+                        await send_tg(chat_id, "✅ အော်ဒါတင်ခြင်း အောင်မြင်ပါသည်။ ကျေးဇူးတင်ပါတယ်။")
+                    
                     else:
                         await send_tg(chat_id, ai_res.get("reply_text"))
 
@@ -74,5 +58,5 @@ async def run_worker():
 
             await asyncio.sleep(2)
         except Exception as e:
-            logger.error(f"Worker Error: {e}")
+            logging.error(f"Worker Error: {e}")
             await asyncio.sleep(5)
