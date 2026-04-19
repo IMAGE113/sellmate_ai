@@ -10,29 +10,36 @@ class AIService:
         self.retry_after = 60 
 
     def _get_system_prompt(self, shop_name, menu):
-        # Menu ရှိမရှိ စစ်ပြီး Prompt ကို ပြောင်းလဲပေးမယ်
-        menu_status = json.dumps(menu, ensure_ascii=False, indent=2) if menu else "လက်ရှိတွင် ရောင်းချရန် Menu မရှိသေးပါ။"
-        
+        menu_json = json.dumps(menu, ensure_ascii=False)
         return f"""
-You are the professional AI Sales Executive for '{shop_name}'. 
-Your primary goal is to take orders in Myanmar language beautifully and accurately.
+မင်းက '{shop_name}' ဆိုင်ရဲ့ လူမှုရေးပြေပြစ်တဲ့ အရောင်းဝန်ထမ်း ဖြစ်တယ်။ 
+Customer နဲ့ စကားပြောတဲ့အခါ စက်ရုပ်လိုမဟုတ်ဘဲ နွေးထွေးတဲ့ အရောင်းဝန်ထမ်းတစ်ယောက်လို မြန်မာလို ယဉ်ကျေးစွာ ပြောပေးပါ။
 
-### CURRENT SHOP MENU:
-{menu_status}
+### ဆိုင်၏ Menu စာရင်း:
+{menu_json}
 
-### OPERATIONAL RULES (STRICT):
-1. Respond in natural, polite Myanmar language (Zawgyi/Unicode friendly).
-2. If the menu is empty, say: "မင်္ဂလာပါခင်ဗျာ။ လက်ရှိမှာတော့ ကျွန်တော်တို့ဆိုင်ရဲ့ Menu စာရင်းကို Dashboard မှာ မထည့်ရသေးလို့ မှာယူလို့မရသေးပါဘူးခင်ဗျာ။"
-3. If menu exists, guide the user to select items, then ask for Name, Phone, and Address.
-4. When all info is ready, present a summary and ask for "Confirm".
-5. ONLY when the user says "Confirm", set 'intent' to 'save_to_db'.
+### လိုက်နာရမည့် အရောင်းအဆင့်ဆင့်:
+၁။ **Greeting**: နှုတ်ဆက်ပြီး Menu ထဲက ဘာယူမလဲ မေးပါ။ (စကားလုံး ထပ်မနေပါစေနှင့်)။
+၂။ **Selection**: User က ပစ္စည်းရွေးပြီးရင် "နာမည်၊ ဖုန်းနံပါတ်၊ လိပ်စာ" မေးပါ။ (စကားလုံး အပိုတွေ မသုံးပါနဲ့)။
+၃။ **Summary**: အချက်အလက်စုံပြီဆိုတာနဲ့ 'intent' ကို 'confirm_order' လို့ ပြောင်းပါ။ reply_text မှာ "အော်ဒါလေး ပြန်စစ်ပေးပါဦး" ဆိုပြီး summary ကို သေချာပြပါ။
+၄။ **Finalization**: User က "ဟုတ်ကဲ့/မှန်ပါတယ်/Confirm" လို့ ပြောမှသာ 'intent' ကို 'save_to_db' လို့ သတ်မှတ်ပါ။
 
 ### OUTPUT FORMAT (STRICT JSON):
 {{
-  "reply_text": "မြန်မာလို စာသားအမှန် (e.g. 'မင်္ဂလာပါ၊ ဘာမှာယူမလဲခင်ဗျာ')",
+  "reply_text": "မြန်မာလို ယဉ်ကျေးသော ပြန်ကြားစာ",
   "intent": "info_gathering" | "confirm_order" | "save_to_db",
-  "order_summary": {{ "name": "...", "phone": "...", "address": "...", "items_text": "...", "total": 0, "payment_type": "..." }},
-  "final_order_data": {{ "name": "...", "phone": "...", "address": "...", "items": [], "total": 0, "payment": "..." }}
+  "order_summary": {{
+      "name": "အမည်",
+      "phone": "ဖုန်း",
+      "address": "လိပ်စာ",
+      "items_text": "မှာယူသည့်ပစ္စည်းများ",
+      "total": 0,
+      "payment_type": "COD"
+  }},
+  "final_order_data": {{
+      "name": "...", "phone": "...", "address": "...",
+      "items": [], "total": 0, "payment": "COD"
+  }}
 }}
 """
 
@@ -45,42 +52,39 @@ Your primary goal is to take orders in Myanmar language beautifully and accurate
 
         try:
             client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            # ensure_ascii=False က မြန်မာစာကို ပိုပီသစေပါတယ်
             response = client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=f"{system_prompt}\n\nCustomer: {user_text}",
-                config={"response_mime_type": "application/json"}
+                config={{"response_mime_type": "application/json"}}
             )
             self.gemini_healthy = True
             return json.loads(response.text)
 
         except Exception as e:
-            logger.error(f"❌ Gemini Error: {e}")
+            logger.error(f"❌ Gemini Error: {{e}}")
             if "429" in str(e) or "quota" in str(e).lower():
                 self.gemini_healthy = False
                 self.last_error_time = current_time
             return await self.call_groq(system_prompt, user_text)
 
     async def call_groq(self, system_prompt, user_text):
-        logger.info("🌪️ Failover Routing: Groq active.")
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
                     "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
-                    json={
+                    headers={{"Authorization": f"Bearer {{os.getenv('GROQ_API_KEY')}} "}},
+                    json={{
                         "model": "llama-3.3-70b-versatile",
                         "messages": [
-                            {"role": "system", "content": "You are a sales assistant. Always reply in beautiful Myanmar language and output strict JSON."},
-                            {"role": "user", "content": f"{system_prompt}\n\nUser: {user_text}"}
+                            {{"role": "system", "content": "You are a professional Burmese sales assistant. Output JSON."}},
+                            {{"role": "user", "content": f"{{system_prompt}}\n\nUser: {{user_text}}"}}
                         ],
-                        "response_format": {"type": "json_object"},
+                        "response_format": {{"type": "json_object"}},
                         "temperature": 0.2
-                    },
-                    timeout=15.0
+                    }}
                 )
                 return json.loads(resp.json()['choices'][0]['message']['content'])
-        except Exception:
-            return {"reply_text": "ခဏလေးစောင့်ပေးပါနော်။ စနစ်အနည်းငယ် အလုပ်များနေလို့ပါ။", "intent": "info_gathering"}
+        except:
+            return {{"reply_text": "ခဏလေးနော်၊ စနစ်အနည်းငယ် အလုပ်များနေလို့ပါ။", "intent": "info_gathering"}}
 
 ai_service = AIService()
