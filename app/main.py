@@ -1,76 +1,146 @@
-from fastapi import FastAPI, Depends
+import os
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
-from .database import get_pool, init_db
-from .schemas import BusinessCreate, ProductCreate, OrderCreate
-from .auth import generate_api_key
-from .ai import ask_gemini
+from fastapi import FastAPI, Request, BackgroundTasks
+from dotenv import load_dotenv
 
+import httpx
+import aiosqlite
+
+# AI (Gemini)
+from google import genai
+from google.genai import types
+
+# ================== ENV ==================
+load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+PORT = int(os.getenv("PORT", 10000))
+
+logging.basicConfig(level=logging.INFO)
+
+# ================== AI CLIENT ==================
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+# ================== LOCAL DB ==================
+DB_FILE = "sellmate.db"
+
+# ================== MEMORY ==================
+user_sessions = {}
+telegram_queue = asyncio.Queue()
+
+# ================== SIMPLE MENU (TEMP) ==================
+MENU = {
+    "coffee": {"price": 1500, "stock": 10},
+    "cola": {"price": 1000, "stock": 20}
+}
+
+# ================== DATABASE ==================
+async def init_db():
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id TEXT,
+            items TEXT,
+            total REAL,
+            status TEXT DEFAULT 'pending'
+        )
+        """)
+        await db.commit()
+
+# ================== TELEGRAM ==================
+async def telegram_worker():
+    async with httpx.AsyncClient() as client:
+        while True:
+            chat_id, text = await telegram_queue.get()
+            try:
+                await client.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": text}
+                )
+            except Exception as e:
+                logging.error(e)
+
+async def send(chat_id: str, text: str):
+    await telegram_queue.put((chat_id, text))
+
+# ================== AI SYSTEM PROMPT ==================
+def system_prompt():
+    return """
+You are SellMate AI assistant.
+
+Rules:
+- You are order assistant
+- Always help user order products
+- Keep replies short
+- If product exists, confirm order
+"""
+
+# ================== AI CHAT ==================
+def get_chat(chat_id: str):
+    if chat_id not in user_sessions:
+        user_sessions[chat_id] = ai_client.chats.create(
+            model="gemini-1.5-flash",
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt(),
+                temperature=0.5
+            )
+        )
+    return user_sessions[chat_id]
+
+# ================== ORDER SAVE ==================
+async def save_order(chat_id: str, items: str, total: float):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute(
+            "INSERT INTO orders (chat_id, items, total) VALUES (?, ?, ?)",
+            (chat_id, items, total)
+        )
+        await db.commit()
+    return {"status": "saved"}
+
+# ================== AI HANDLER ==================
+async def handle_ai(chat_id: str, text: str):
+    chat = get_chat(chat_id)
+
+    response = await asyncio.to_thread(
+        chat.send_message,
+        text
+    )
+
+    return response.text
+
+# ================== WEBHOOK ==================
 app = FastAPI()
 
-# DB
-pool = None
+@app.on_event("startup")
+async def startup():
+    await init_db()
+    asyncio.create_task(telegram_worker())
 
+@app.post("/webhook")
+async def webhook(req: Request, bg: BackgroundTasks):
+    data = await req.json()
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global pool
-    pool = await get_pool()
-    await init_db(pool)
-    yield
-    await pool.close()
+    msg = data.get("message", {})
+    text = msg.get("text")
+    chat_id = str(msg.get("chat", {}).get("id"))
 
+    if not text:
+        return {"ok": True}
 
-app = FastAPI(lifespan=lifespan)
+    reply = await handle_ai(chat_id, text)
 
+    await send(chat_id, reply)
 
-# ---------------- BUSINESS ----------------
-@app.post("/business/create")
-async def create_business(data: BusinessCreate):
-    api_key = generate_api_key()
+    return {"ok": True}
 
-    async with pool.acquire() as conn:
-        bid = await conn.fetchval(
-            "INSERT INTO businesses (name, api_key) VALUES ($1, $2) RETURNING id",
-            data.name, api_key
-        )
-
-    return {"business_id": bid, "api_key": api_key}
-
-
-# ---------------- PRODUCTS ----------------
-@app.post("/product/add")
-async def add_product(data: ProductCreate):
-    async with pool.acquire() as conn:
-        pid = await conn.fetchval("""
-            INSERT INTO products (business_id, name, price, stock)
-            VALUES ($1,$2,$3,$4) RETURNING id
-        """, data.business_id, data.name, data.price, data.stock)
-
-    return {"product_id": pid}
-
-
-# ---------------- ORDERS ----------------
-@app.post("/order/create")
-async def create_order(data: OrderCreate):
-    async with pool.acquire() as conn:
-
-        price = await conn.fetchval(
-            "SELECT price FROM products WHERE id=$1",
-            data.product_id
-        )
-
-        total = price * data.qty
-
-        oid = await conn.fetchval("""
-            INSERT INTO orders (business_id, product_id, qty, total)
-            VALUES ($1,$2,$3,$4) RETURNING id
-        """, data.business_id, data.product_id, data.qty, total)
-
-    return {"order_id": oid, "total": total}
-
-
-# ---------------- AI TEST ----------------
-@app.post("/ai/test")
-async def ai_test(prompt: str):
-    return {"reply": ask_gemini(prompt)}
+# ================== RUN ==================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
