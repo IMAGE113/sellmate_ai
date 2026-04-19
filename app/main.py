@@ -5,22 +5,16 @@ import asyncio
 import threading
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
-
-# ကိုယ့်ရဲ့ database နဲ့ worker ဖိုင်တွေထဲက function တွေကို import လုပ်မယ်
-from .database import get_db_pool 
+from .database import get_db_pool, init_db
 from .worker import run_worker
 
-# Logging setup (Production မှာ log တွေကြည့်လို့ရအောင်)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
+# Logging setup
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# --- 🛠️ Background Worker Thread Runner (Free Plan အတွက်) ---
+# --- Worker Thread Launcher ---
 def start_worker_thread():
-    """Worker ကို thread တစ်ခုအနေနဲ့ သီးသန့် loop တစ်ခုနဲ့ run ပေးမယ်"""
-    logger.info("🧵 Starting Background Worker Thread...")
+    """Worker ကို Thread သီးသန့်နဲ့ Run ပေးမယ်"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -28,70 +22,49 @@ def start_worker_thread():
     except Exception as e:
         logger.error(f"❌ Worker Thread Crash: {e}")
 
-# --- 🚀 Lifespan Manager (Startup & Shutdown Logic) ---
+# --- Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ၁။ Startup: Database Connection Pool တည်ဆောက်ပြီး Table တွေပါစစ်မယ်
-    try:
-        app.state.pool = await get_db_pool()
-        logger.info("✅ Database System Initialized (Pool & Tables).")
-    except Exception as e:
-        logger.error(f"❌ critical: Database Initialization Failed: {e}")
-        raise e
-
-    # ၂။ Startup: Worker ကို Thread နဲ့ စတင်မယ်
-    # daemon=True ထားတာက Web Server ပိတ်ရင် worker ပါ တစ်ခါတည်း သေသွားအောင်လို့ပါ
+    # ၁။ Startup: Database Pool ဆောက်မယ်
+    app.state.pool = await get_db_pool()
+    
+    # ၂။ Startup: Table Initialization (အလုပ်ပြီးအောင် အရင်စောင့်မယ်)
+    # ဒါမှ 'operation in progress' error မတက်မှာပါ
+    await init_db(app.state.pool)
+    
+    # ၃။ Startup: အားလုံးအဆင်သင့်ဖြစ်ပြီဆိုမှ Worker ကို Thread နဲ့ စတင်မယ်
     worker_thread = threading.Thread(target=start_worker_thread, daemon=True)
     worker_thread.start()
-    logger.info("✅ Hybrid Mode: Worker thread is running alongside Web Service.")
+    logger.info("🚀 System is fully online: Webhook & Worker are active.")
 
     yield
     
-    # ၃။ Shutdown: Database connection တွေကို စနစ်တကျ ပြန်ပိတ်မယ်
-    if hasattr(app.state, "pool") and app.state.pool:
+    # ၄။ Shutdown: Pool ပြန်ပိတ်မယ်
+    if hasattr(app.state, "pool"):
         await app.state.pool.close()
-        logger.info("🛑 Database pool closed. System shut down safely.")
+        logger.info("🛑 Database pool closed.")
 
-# --- 🌐 FastAPI Instance ---
-app = FastAPI(
-    title="SellMate AI SaaS",
-    lifespan=lifespan
-)
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {
-        "status": "online",
-        "service": "SellMate AI Hybrid Core",
-        "version": "2.5.1"
-    }
+    return {"status": "running", "mode": "hybrid-worker"}
 
-# --- 🤖 Telegram Webhook Endpoint ---
 @app.post("/webhook/telegram")
 async def telegram_webhook(req: Request):
     try:
         data = await req.json()
-    except Exception:
-        return {"ok": False, "detail": "Invalid JSON data"}
+        msg = data.get("message", {})
+        text = msg.get("text")
+        chat_id = msg.get("chat", {}).get("id")
+        message_id = msg.get("message_id")
 
-    # Telegram Data Extraction
-    msg = data.get("message", {})
-    text = msg.get("text")
-    chat_id = msg.get("chat", {}).get("id")
-    message_id = msg.get("message_id")
+        if not text or not chat_id: return {"ok": True}
 
-    # စာသားမပါရင် ဘာမှမလုပ်ဘဲ ပြန်ထွက်မယ်
-    if not text or not chat_id:
-        return {"ok": True}
+        # Duplicate message စစ်ဖို့ hash လုပ်မယ်
+        req_hash = hashlib.md5(f"{chat_id}:{message_id}".encode()).hexdigest()
 
-    # IDEMPOTENCY: Duplicate Message တွေကို ကာကွယ်ဖို့ Hash လုပ်မယ်
-    req_hash = hashlib.md5(f"{chat_id}:{message_id}".encode()).hexdigest()
-
-    # Database ထဲကို Task အဖြစ် ထည့်သွင်းခြင်း
-    async with app.state.pool.acquire() as conn:
-        try:
-            # task_queue table ထဲကို 'pending' status နဲ့ ထည့်မယ်
-            # shop_id=1 က database.py မှာ အလိုအလျောက် ဆောက်ပေးထားတဲ့ ID ဖြစ်တယ်
+        async with app.state.pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO task_queue (shop_id, chat_id, user_text, request_hash, status)
@@ -100,10 +73,9 @@ async def telegram_webhook(req: Request):
                 """,
                 1, str(chat_id), text, req_hash
             )
-            logger.info(f"📥 New Task Queued | Chat ID: {chat_id} | Hash: {req_hash}")
-        except Exception as e:
-            logger.error(f"❌ Queueing Error: {e}")
-            return {"ok": False, "error": "Database insert failed"}
+            logger.info(f"📥 New Task Queued for Chat ID: {chat_id}")
 
-    # Telegram ကို ၂၀၀ မီလီစက္ကန့်အတွင်း OK ပြန်ရမယ် (ဒါမှ message ထပ်မပို့မှာ)
+    except Exception as e:
+        logger.error(f"❌ Webhook Endpoint Error: {e}")
+        
     return {"ok": True}
