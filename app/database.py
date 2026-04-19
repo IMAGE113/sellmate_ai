@@ -1,86 +1,98 @@
-import os, json, time, httpx, logging
-from google import genai
+import asyncpg
+import os
+import logging
 
+DATABASE_URL = os.getenv("DATABASE_URL")
 logger = logging.getLogger(__name__)
 
-class AIService:
-    def __init__(self):
-        self.gemini_healthy = True
-        self.last_error_time = 0
-        self.retry_after = 60 
+web_pool = None 
+worker_pool = None
 
-    def _get_system_prompt(self, shop_name, menu):
-        # Menu ရှိမရှိ စစ်ပြီး Prompt ကို ပြောင်းလဲပေးမယ်
-        menu_status = json.dumps(menu, ensure_ascii=False, indent=2) if menu else "လက်ရှိတွင် ရောင်းချရန် Menu မရှိသေးပါ။"
+async def get_db_pool(for_worker=False):
+    global web_pool, worker_pool
+    if for_worker:
+        if worker_pool is None:
+            worker_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require', min_size=1, max_size=10)
+        return worker_pool
+    else:
+        if web_pool is None:
+            web_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require', min_size=1, max_size=10)
+        return web_pool
+
+async def init_db(pool):
+    async with pool.acquire() as conn:
+        logger.info("🛠️ Validating SaaS Database Structure...")
         
-        return f"""
-You are the professional AI Sales Executive for '{shop_name}'. 
-Your primary goal is to take orders in Myanmar language beautifully and accurately.
+        # ၁။ ဆိုင်ရှင်များဇယား
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS businesses (
+            id SERIAL PRIMARY KEY,
+            shop_name TEXT NOT NULL,
+            owner_chat_id TEXT, 
+            is_active BOOLEAN DEFAULT TRUE
+        );
+        ''')
 
-### CURRENT SHOP MENU:
-{menu_status}
+        # ၂။ ဆိုင်အလိုက် Menu
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            price REAL NOT NULL,
+            stock INTEGER DEFAULT 0,
+            is_available BOOLEAN DEFAULT TRUE
+        );
+        ''')
 
-### OPERATIONAL RULES (STRICT):
-1. Respond in natural, polite Myanmar language (Zawgyi/Unicode friendly).
-2. If the menu is empty, say: "မင်္ဂလာပါခင်ဗျာ။ လက်ရှိမှာတော့ ကျွန်တော်တို့ဆိုင်ရဲ့ Menu စာရင်းကို Dashboard မှာ မထည့်ရသေးလို့ မှာယူလို့မရသေးပါဘူးခင်ဗျာ။"
-3. If menu exists, guide the user to select items, then ask for Name, Phone, and Address.
-4. When all info is ready, present a summary and ask for "Confirm".
-5. ONLY when the user says "Confirm", set 'intent' to 'save_to_db'.
+        # ၃။ အော်ဒါများဇယား
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+            customer_name TEXT,
+            phone_no TEXT,
+            address TEXT,
+            items JSONB,
+            total_price REAL,
+            payment_type TEXT,
+            status TEXT DEFAULT 'PENDING',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        ''')
 
-### OUTPUT FORMAT (STRICT JSON):
-{{
-  "reply_text": "မြန်မာလို စာသားအမှန် (e.g. 'မင်္ဂလာပါ၊ ဘာမှာယူမလဲခင်ဗျာ')",
-  "intent": "info_gathering" | "confirm_order" | "save_to_db",
-  "order_summary": {{ "name": "...", "phone": "...", "address": "...", "items_text": "...", "total": 0, "payment_type": "..." }},
-  "final_order_data": {{ "name": "...", "phone": "...", "address": "...", "items": [], "total": 0, "payment": "..." }}
-}}
-"""
-
-    async def process_chat(self, user_text, chat_id, shop_name, menu):
-        system_prompt = self._get_system_prompt(shop_name, menu)
+        # ၄။ Task Queue
+        await conn.execute('''
+        CREATE TABLE IF NOT EXISTS task_queue (
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id),
+            chat_id TEXT NOT NULL,
+            user_text TEXT,
+            request_hash TEXT UNIQUE,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        ''')
         
-        current_time = time.time()
-        if not self.gemini_healthy and (current_time - self.last_error_time < self.retry_after):
-            return await self.call_groq(system_prompt, user_text)
+        # --- INITIAL DATA FOR TESTING ---
+        
+        # ဆိုင်ထည့်ခြင်း (ID=1)
+        await conn.execute("""
+            INSERT INTO businesses (id, shop_name) 
+            VALUES (1, 'Randy Cafe') 
+            ON CONFLICT (id) DO NOTHING;
+        """)
 
-        try:
-            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            # ensure_ascii=False က မြန်မာစာကို ပိုပီသစေပါတယ်
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=f"{system_prompt}\n\nCustomer: {user_text}",
-                config={"response_mime_type": "application/json"}
-            )
-            self.gemini_healthy = True
-            return json.loads(response.text)
+        # စမ်းသပ်ရန် ပစ္စည်း (Menu) များ ထည့်ခြင်း
+        # ID=1 (Randy Cafe) အတွက် ပစ္စည်း ၃ ခု
+        await conn.execute("""
+            INSERT INTO products (business_id, name, price, stock, is_available)
+            VALUES 
+            (1, 'Espresso', 3500.0, 100, TRUE),
+            (1, 'Latte', 4500.0, 50, TRUE),
+            (1, 'Cappuccino', 4500.0, 50, TRUE)
+            ON CONFLICT DO NOTHING;
+        """)
 
-        except Exception as e:
-            logger.error(f"❌ Gemini Error: {e}")
-            if "429" in str(e) or "quota" in str(e).lower():
-                self.gemini_healthy = False
-                self.last_error_time = current_time
-            return await self.call_groq(system_prompt, user_text)
-
-    async def call_groq(self, system_prompt, user_text):
-        logger.info("🌪️ Failover Routing: Groq active.")
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
-                    json={
-                        "model": "llama-3.3-70b-versatile",
-                        "messages": [
-                            {"role": "system", "content": "You are a sales assistant. Always reply in beautiful Myanmar language and output strict JSON."},
-                            {"role": "user", "content": f"{system_prompt}\n\nUser: {user_text}"}
-                        ],
-                        "response_format": {"type": "json_object"},
-                        "temperature": 0.2
-                    },
-                    timeout=15.0
-                )
-                return json.loads(resp.json()['choices'][0]['message']['content'])
-        except Exception:
-            return {"reply_text": "ခဏလေးစောင့်ပေးပါနော်။ စနစ်အနည်းငယ် အလုပ်များနေလို့ပါ။", "intent": "info_gathering"}
-
-ai_service = AIService()
+        logger.info("✅ SaaS Database check complete with Initial Menu Items.")
