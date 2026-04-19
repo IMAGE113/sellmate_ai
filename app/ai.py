@@ -1,24 +1,41 @@
+import os
+import json
 from google import genai
 from google.genai import types
-import os
 
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-
-client = genai.Client(api_key=GEMINI_KEY)
-
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 SYSTEM_PROMPT = """
-You are SellMate AI.
-You are business order assistant for Myanmar merchants.
-Be short, clear, actionable.
+Extract order from text.
+
+Return JSON only:
+{
+ "intent":"order|chat",
+ "items":[{"name":"","qty":1}]
+}
+
+Examples:
+"cola 2" → {"intent":"order","items":[{"name":"cola","qty":2}]}
+"ကော်ဖီ ၃" → {"intent":"order","items":[{"name":"coffee","qty":3}]}
 """
 
-
-def get_gemini_chat():
-    return client.chats.create(
-        model="gemini-1.5-flash",
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.4
+def parse_order(text: str):
+    try:
+        res = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_PROMPT,
+                temperature=0.2
+            )
         )
-    )
+
+        raw = res.text.strip()
+
+        if raw.startswith("```"):
+            raw = raw.replace("```json", "").replace("```", "").strip()
+
+        return json.loads(raw)
+
+    except:
+        return {"intent":"chat","items":[]}
