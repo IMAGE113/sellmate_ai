@@ -1,26 +1,30 @@
+from .ai import get_gemini_chat
 from .intent import detect_intent
-from .ai import ask_ai
+
+sessions = {}
+
+def get_session(chat_id: str):
+    if chat_id not in sessions:
+        sessions[chat_id] = get_gemini_chat()
+    return sessions[chat_id]
 
 
-async def process_message(text: str):
+async def process_message(chat_id: str, text: str):
 
-    ai = await ask_ai(text)
-
-    # AI4BURMESE FLOW
-    if ai.get("source") == "ai4burmese":
-        intent = ai["result"].get("intent")
-
-        if intent == "order":
-            return {
-                "type": "order_flow",
-                "engine": "ai4burmese"
-            }
-
-    # NORMAL FLOW
     intent = detect_intent(text)
+    chat = get_session(chat_id)
 
-    return {
-        "type": "chat",
-        "intent": intent,
-        "ai": ai
-    }
+    # ORDER FLOW (simple logic now)
+    if intent == "ORDER":
+        response = chat.send_message(
+            f"User wants to order: {text}"
+        )
+        return response.text
+
+    # STOCK FLOW
+    if intent == "STOCK":
+        return "Stock system coming next step."
+
+    # CHAT FLOW
+    response = chat.send_message(text)
+    return response.text
