@@ -1,41 +1,49 @@
 import os
 import json
+import logging
 from google import genai
 from google.genai import types
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
+# Manual Override အတွက် မြန်မာ Keyword များ
+ORDER_KEYWORDS = ["ယူမယ်", "ဝယ်မယ်", "လိုချင်", "ပေးပါ", "မှာမယ်", "ရမလား", "ခွက်", "ဗူး", "ထုပ်", "ထုတ်"]
+
 def parse_order(text: str):
-    prompt = f"""
-    You are a POS system. Your task is to extract items and quantities from user messages.
+    # Keyword ပါမပါ အရင်စစ်မယ်
+    is_likely_order = any(k in text for k in ORDER_KEYWORDS)
     
-    Rules:
-    1. If the user wants to buy/order any item (e.g., "Coffee 1", "Cola ၂ ဗူး"), set intent to "order".
-    2. Extract product name and quantity (as integer).
-    3. If the message is just a greeting or unrelated, set intent to "chat".
-    4. MUST return ONLY a JSON object.
-
-    User message: "{text}"
-
-    JSON Format:
-    {{
-        "intent": "order",
-        "items": [
-            {{"name": "product_name", "qty": 1}}
-        ]
-    }}
+    system_prompt = """
+    You are SellMate POS AI.
+    - If user mentions any product name or quantity, intent MUST be 'order'.
+    - Convert Burmese numbers to English integers.
+    - Return ONLY valid JSON.
+    Format: {"intent": "order/chat", "items": [{"name": "...", "qty": 1}]}
     """
-    
+
     try:
         response = client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=prompt,
+            contents=f"{system_prompt}\n\nUser text: '{text}'",
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 temperature=0.0
             )
         )
-        return json.loads(response.text)
+        
+        result = json.loads(response.text)
+        
+        # Hybrid Fix: AI က chat လို့ မှားရင်တောင် Keyword ပါရင် Order အဖြစ် ပြောင်းမယ်
+        if result.get("intent") == "chat" and is_likely_order:
+            logger.info(f"Hybrid Engine Triggered: Overriding intent for '{text}'")
+            result["intent"] = "order"
+            
+        logger.info(f"AI OUTPUT: {result}")
+        return result
+
     except Exception as e:
-        print(f"AI Error: {e}")
+        logger.error(f"AI ERROR: {e}")
         return {"intent": "chat", "items": []}
