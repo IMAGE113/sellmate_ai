@@ -8,7 +8,10 @@ async def get_db_pool():
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        # Shop Owners Table (Dashboard နဲ့ ချိတ်မယ့် အဓိကနေရာ)
+        # Table structure တွေ ပြောင်းသွားလို့ error တက်နေရင် အောက်က line ကို တစ်ခါပဲ သုံးပြီး ပြန်ဖျက်ပါ
+        # await conn.execute("DROP TABLE IF EXISTS orders, products, businesses CASCADE")
+
+        # 1. Shop Owners
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
@@ -18,7 +21,8 @@ async def init_db(pool):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         ''')
-        # Products Table (Dashboard ကနေ Manage လုပ်လို့ရမယ်)
+
+        # 2. Inventory (Dashboard Manage လုပ်မယ့်အပိုင်း)
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
@@ -29,13 +33,14 @@ async def init_db(pool):
             code TEXT
         );
         ''')
-        # Orders Table (Dashboard မှာ အော်ဒါစာရင်း ပြဖို့)
+
+        # 3. Orders
         await conn.execute('''
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
             business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             items JSONB,
-            total REAL,
+            total REAL DEFAULT 0,
             status TEXT DEFAULT 'PENDING',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
