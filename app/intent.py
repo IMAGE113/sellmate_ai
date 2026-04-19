@@ -1,17 +1,13 @@
-from ai4burmese import IntentClassifier
-
-classifier = IntentClassifier(model="padauk")
-
 def detect_intent(text: str):
-    try:
-        return classifier.predict(text)
-    except:
-        text = text.lower()
+    t = text.lower()
 
-        if "order" in text or "ဝယ်" in text:
-            return "ORDER"
+    if "မှာ" in t or "order" in t or "ဝယ်" in t:
+        return "order"
 
-        if "cancel" in text:
-            return "CANCEL"
+    if "stock" in t:
+        return "stock"
 
-        return "CHAT"
+    if "price" in t:
+        return "price"
+
+    return "chat"
