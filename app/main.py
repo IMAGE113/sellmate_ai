@@ -1,58 +1,30 @@
-import os, json, httpx, logging
+import hashlib, os
 from fastapi import FastAPI, Request
-from contextlib import asynccontextmanager
-from .database import get_db_pool, init_db
-from .ai import parse_order
-from .auth import generate_api_key
+from .database import get_db_pool # မင်းဆီက db connection pool
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-async def send_tg(chat_id, text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"})
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.pool = await get_db_pool()
-    await init_db(app.state.pool)
-    yield
-    await app.state.pool.close()
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 @app.post("/webhook/telegram")
-async def webhook(req: Request):
-    try:
-        data = await req.json()
-        msg = data.get("message", {})
-        text = msg.get("text", "")
-        chat_id = str(msg.get("chat", {}).get("id", ""))
-        if not text: return {"ok": True}
+async def telegram_webhook(req: Request):
+    data = await req.json()
+    msg = data.get("message", {})
+    text = msg.get("text", "")
+    chat_id = str(msg.get("chat", {}).get("id", ""))
+    message_id = msg.get("message_id")
 
-        logger.info(f"Incoming: {text}")
+    if not text: return {"ok": True}
 
-        async with app.state.pool.acquire() as conn:
-            if text.startswith("/start"):
-                shop_name = text.replace("/start", "").strip() or "My Shop"
-                api_key = generate_api_key()
-                await conn.execute("INSERT INTO businesses (name, api_key, admin_chat_id) VALUES ($1,$2,$3) ON CONFLICT (admin_chat_id) DO NOTHING", shop_name, api_key, chat_id)
-                await send_tg(chat_id, f"✅ *{shop_name}* Registered!")
-                return {"ok": True}
+    # IDEMPOTENCY GUARD: Message ID နဲ့ Hash လုပ်ပြီး duplicate တားမယ်
+    req_hash = hashlib.md5(f"{chat_id}:{message_id}".encode()).hexdigest()
 
-            ai_res = parse_order(text)
-            business = await conn.fetchrow("SELECT id FROM businesses WHERE admin_chat_id = $1", chat_id)
-
-            items = ai_res.get("items", [])
-            if (ai_res.get("intent") == "order") and items:
-                await conn.execute("INSERT INTO orders (business_id, items, status) VALUES ($1, $2, 'PENDING')", business['id'], json.dumps(items))
-                summary = "\n".join([f"• {i['name']} - {i['qty']}" for i in items])
-                await send_tg(chat_id, f"🛒 *အော်ဒါလက်ခံရရှိပါပြီ!*\n\n{summary}")
-            else:
-                await send_tg(chat_id, "မင်္ဂလာပါရှင်၊ ဘာများ မှာယူချင်ပါသလဲ?")
-    except Exception as e:
-        logger.error(f"Error: {e}")
+    async with app.state.pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "INSERT INTO task_queue (shop_id, chat_id, user_text, request_hash) VALUES ($1, $2, $3, $4)",
+                1, chat_id, text, req_hash
+            )
+        except:
+            # Duplicate message ဆိုရင် ignore လုပ်မယ်
+            pass
+            
     return {"ok": True}
