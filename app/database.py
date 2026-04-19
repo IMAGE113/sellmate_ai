@@ -6,11 +6,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-
-async def get_db_pool():
-    if not DATABASE_URL:
-        raise Exception("DATABASE_URL is missing in environment variables")
-
+async def get_pool():
     return await asyncpg.create_pool(DATABASE_URL)
 
 
@@ -19,28 +15,24 @@ async def init_db(pool):
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            api_key TEXT UNIQUE,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            name TEXT,
+            api_key TEXT UNIQUE
         );
 
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
-            business_id INT REFERENCES businesses(id),
-            name TEXT NOT NULL,
-            price FLOAT NOT NULL,
-            stock INT DEFAULT 0,
-            code TEXT
+            business_id INT,
+            name TEXT,
+            price FLOAT,
+            stock INT
         );
 
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
-            business_id INT REFERENCES businesses(id),
+            business_id INT,
             product_id INT,
             qty INT,
             total FLOAT,
-            status TEXT DEFAULT 'PENDING',
-            payment_type TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            status TEXT DEFAULT 'PENDING'
         );
         """)
