@@ -8,17 +8,28 @@ worker_pool = None
 
 async def get_db_pool(for_worker=False):
     global web_pool, worker_pool
+    
+    # statement_cache_size=0 က schema ပြောင်းလဲမှုတွေကြောင့်ဖြစ်တဲ့ error ကို ကာကွယ်ပေးတယ်
     if for_worker:
         if worker_pool is None:
-            worker_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
+            worker_pool = await asyncpg.create_pool(
+                DATABASE_URL, 
+                ssl='require',
+                statement_cache_size=0
+            )
         return worker_pool
     else:
         if web_pool is None:
-            web_pool = await asyncpg.create_pool(DATABASE_URL, ssl='require')
+            web_pool = await asyncpg.create_pool(
+                DATABASE_URL, 
+                ssl='require',
+                statement_cache_size=0
+            )
         return web_pool
 
 async def init_db(pool):
     async with pool.acquire() as conn:
+        # Businesses Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
@@ -27,46 +38,54 @@ async def init_db(pool):
         );
         """)
 
+        # Products Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
-            business_id INT,
+            business_id INT REFERENCES businesses(id) ON DELETE CASCADE,
             name TEXT,
             price REAL
         );
         """)
 
+        # Orders Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
-            business_id INT,
+            business_id INT REFERENCES businesses(id),
             customer_name TEXT,
             phone_no TEXT,
             address TEXT,
             items JSONB,
             total_price REAL,
-            order_hash TEXT UNIQUE
+            order_hash TEXT UNIQUE,
+            created_at TIMESTAMP DEFAULT NOW()
         );
         """)
 
+        # Pending Orders Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS pending_orders (
             chat_id TEXT,
-            business_id INT,
+            business_id INT REFERENCES businesses(id),
             order_data JSONB,
+            updated_at TIMESTAMP DEFAULT NOW(),
             PRIMARY KEY(chat_id, business_id)
         );
         """)
 
+        # Task Queue Table (Worker အတွက် Column အပြည့်အစုံနဲ့)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS task_queue (
             id SERIAL PRIMARY KEY,
-            business_id INT,
+            business_id INT REFERENCES businesses(id) ON DELETE CASCADE,
             chat_id TEXT,
             user_text TEXT,
             request_hash TEXT UNIQUE,
             status TEXT DEFAULT 'pending',
             attempts INT DEFAULT 0,
+            last_error TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );
         """)
