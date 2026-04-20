@@ -1,107 +1,66 @@
-import asyncpg, os, logging
+from fastapi import FastAPI, Request, HTTPException
+from .database import get_db_pool, init_db
+from .worker import run_worker
+import hashlib, asyncio, os
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-logger = logging.getLogger(__name__)
+# FastAPI instance ကို တည်ဆောက်ခြင်း (Render deploy လုပ်ဖို့ အရေးကြီးဆုံးအပိုင်း)
+app = FastAPI()
 
-web_pool = None
-worker_pool = None
+@app.on_event("startup")
+async def start():
+    """
+    Server စတက်တာနဲ့ Database ချိတ်မယ်၊ Table တွေဆောက်မယ်၊ 
+    ပြီးရင် နောက်ကွယ်မှာ အလုပ်လုပ်မယ့် Worker ကိုပါ တန်း Run မယ်။
+    """
+    pool = await get_db_pool()
+    await init_db(pool)
+    # Background task အနေနဲ့ worker ကို run ခိုင်းထားခြင်း
+    asyncio.create_task(run_worker())
 
-async def get_db_pool(for_worker=False):
-    global web_pool, worker_pool
-    if for_worker:
-        if worker_pool is None:
-            worker_pool = await asyncpg.create_pool(
-                DATABASE_URL, ssl='require', statement_cache_size=0
-            )
-        return worker_pool
-    else:
-        if web_pool is None:
-            web_pool = await asyncpg.create_pool(
-                DATABASE_URL, ssl='require', statement_cache_size=0
-            )
-        return web_pool
+@app.get("/")
+async def root():
+    return {"message": "SellMate AI Server is running!"}
 
-# ဆိုင်အသစ်တွေကို Database ထဲထည့်ပေးမယ့် Function (Main.py ကနေ ခေါ်သုံးလို့ရအောင်)
-async def register_business(pool, shop_name, token):
+@app.post("/webhook/{token}")
+async def webhook(token: str, request: Request):
+    """
+    Telegram ကပို့သမျှ စာတွေကို ဒီ Webhook ကနေ လက်ခံမယ်။
+    Token ကိုကြည့်ပြီး ဘယ်ဆိုင်လဲဆိုတာ ခွဲခြားမယ်။
+    """
+    # 1. Security Check (WeLoveRandy ဖြစ်ရမယ်)
+    expected_secret = os.getenv("TELEGRAM_SECRET_TOKEN")
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != expected_secret:
+        logger_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        print(f"Secret Token Mismatch: Got {logger_secret}")
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    # 2. လက်ခံရရှိတဲ့ Data ကိုယူမယ်
+    data = await request.json()
+    pool = await get_db_pool()
+
     async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO businesses (shop_name, tg_bot_token)
-            VALUES ($1, $2)
-            ON CONFLICT (tg_bot_token) DO UPDATE SET shop_name = $1
-        """, shop_name, token)
-        logger.info(f"Business {shop_name} registered/updated.")
-
-async def init_db(pool):
-    async with pool.acquire() as conn:
-        # 1. Businesses Table (Bot Token တွေကို ဒီမှာသိမ်းမယ်)
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS businesses (
-            id SERIAL PRIMARY KEY,
-            shop_name TEXT,
-            tg_bot_token TEXT UNIQUE,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
-        # 2. Products Table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            business_id INT REFERENCES businesses(id) ON DELETE CASCADE,
-            name TEXT,
-            price REAL
-        );
-        """)
-
-        # 3. Orders Table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id SERIAL PRIMARY KEY,
-            business_id INT REFERENCES businesses(id),
-            customer_name TEXT,
-            phone_no TEXT,
-            address TEXT,
-            items JSONB,
-            total_price REAL,
-            order_hash TEXT UNIQUE,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
-
-        # 4. Pending Orders Table
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS pending_orders (
-            chat_id TEXT,
-            business_id INT REFERENCES businesses(id),
-            order_data JSONB,
-            updated_at TIMESTAMP DEFAULT NOW(),
-            PRIMARY KEY(chat_id, business_id)
-        );
-        """)
-
-        # 5. Task Queue Table (Main.py က request_hash နဲ့ conflict မဖြစ်အောင် စစ်ဖို့)
-        await conn.execute("""
-        CREATE TABLE IF NOT EXISTS task_queue (
-            id SERIAL PRIMARY KEY,
-            business_id INT REFERENCES businesses(id) ON DELETE CASCADE,
-            chat_id TEXT,
-            user_text TEXT,
-            request_hash TEXT UNIQUE,
-            status TEXT DEFAULT 'pending',
-            attempts INT DEFAULT 0,
-            last_error TEXT,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        );
-        """)
+        # 3. Database ထဲမှာ ဒီ Bot Token ရှိမရှိ စစ်မယ်
+        biz = await conn.fetchrow("SELECT id FROM businesses WHERE tg_bot_token=$1", token)
+        if not biz:
+            return {"ok": False, "error": "Business not found"}
         
-        # --- [စမ်းသပ်ရန်] Randy Cafe ကို အလိုအလျောက် ထည့်သွင်းပေးခြင်း ---
-        # ဖွင့်ထားတဲ့ Env ထဲမှာ SHOP_NAME နဲ့ TG_BOT_TOKEN ရှိရင် Database ထဲ တန်းထည့်ပေးမယ်
-        shop_name = os.getenv("SHOP_NAME", "Randy Cafe")
-        bot_token = os.getenv("TG_BOT_TOKEN")
-        if bot_token:
-            await conn.execute("""
-                INSERT INTO businesses (shop_name, tg_bot_token) 
-                VALUES ($1, $2)
-                ON CONFLICT (tg_bot_token) DO NOTHING
-            """, shop_name, bot_token)
+        b_id = biz['id']
+
+        # 4. Message data မပါရင် အကြောင်းပြန်စရာမလိုလို့ ကျော်မယ်
+        if "message" not in data:
+            return {"ok": True}
+
+        chat_id = str(data["message"]["chat"]["id"])
+        text = data["message"].get("text", "")
+
+        # 5. Message တစ်ခုတည်း ခဏခဏ မဝင်အောင် Hash လုပ်မယ်
+        h = hashlib.md5(f"{b_id}:{chat_id}:{text}".encode()).hexdigest()
+
+        # 6. Task Queue Table ထဲကို ထည့်မယ် (Worker က ဒါကိုကြည့်ပြီး အလုပ်လုပ်မယ်)
+        await conn.execute("""
+            INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (request_hash) DO NOTHING
+        """, b_id, chat_id, text, h)
+
+    return {"ok": True}
