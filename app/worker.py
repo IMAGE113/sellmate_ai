@@ -12,9 +12,10 @@ http_client = httpx.AsyncClient(timeout=15.0)
 
 async def send(token, chat_id, text):
     try:
+        # chat_id ကို integer ဖြစ်အောင် သေချာအောင် လုပ်မယ်
         await http_client.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            json={"chat_id": int(chat_id), "text": text, "parse_mode": "Markdown"},
         )
     except Exception as e:
         print(f"Telegram Send Error: {e}")
@@ -51,6 +52,7 @@ async def run_worker():
     while True:
         try:
             async with pool.acquire() as conn:
+                # updated_at နဲ့ attempts column တွေ သုံးပြီး task ဆွဲယူမယ်
                 task = await conn.fetchrow("""
                     UPDATE task_queue 
                     SET status='processing', attempts = attempts + 1, updated_at = NOW()
@@ -68,8 +70,9 @@ async def run_worker():
                     continue
 
                 b_id = task['business_id']
-                chat_id = task['chat_id']
-                text = task['user_text']
+                # Chat ID ကို BIGINT ဖြစ်တဲ့အတွက် integer အဖြစ် တန်းသုံးမယ်
+                chat_id = task['chat_id'] 
+                text = task['user_text'] or ""
 
                 biz = await conn.fetchrow("SELECT * FROM businesses WHERE id=$1", b_id)
                 if not biz:
@@ -77,9 +80,10 @@ async def run_worker():
                     continue
 
                 token = biz['tg_bot_token']
+                shop_name = biz['name']
 
                 try:
-                    # --- Logic A: Order Confirmation (ဝယ်သူက CONFIRM လို့ပို့လျှင်) ---
+                    # --- Logic A: Order Confirmation ---
                     if text.strip().upper() == "CONFIRM":
                         row = await conn.fetchrow("""
                             DELETE FROM pending_orders 
@@ -89,18 +93,16 @@ async def run_worker():
 
                         if row:
                             d = json.loads(row['order_data'])
-                            # Hash for unique check
                             h = hashlib.md5(f"{chat_id}:{row['order_data']}".encode()).hexdigest()
 
-                            # 🔥 Orders Table ထဲသို့ အပြီးသတ် သိမ်းဆည်းခြင်း
                             await conn.execute("""
                                 INSERT INTO orders (
-                                    business_id, customer_name, phone_no, address, 
+                                    business_id, chat_id, customer_name, phone_no, address, 
                                     items, total_price, payment_method, status, order_hash
                                 )
-                                VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', $9)
                                 ON CONFLICT (order_hash) DO NOTHING
-                            """, b_id, d.get('customer_name'), d.get('phone_no'), d.get('address'), 
+                            """, b_id, chat_id, d.get('customer_name'), d.get('phone_no'), d.get('address'), 
                                  json.dumps(d.get('items')), d.get('total_price'), 
                                  d.get('payment_method', 'COD'), h)
 
@@ -108,7 +110,7 @@ async def run_worker():
                         else:
                             await send(token, chat_id, "⚠️ အတည်ပြုရန် အော်ဒါမရှိသေးပါ။ အရင်ဆုံး စာရင်းပေးပေးပါ။")
 
-                    # --- Logic B: AI Processing (ပုံမှန် စကားပြော/အော်ဒါကောက်ယူခြင်း) ---
+                    # --- Logic B: AI Processing ---
                     else:
                         menu_rows = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
                         menu_text = "\n".join([f"- {m['name']}: {m['price']} MMK" for m in menu_rows])
@@ -116,9 +118,8 @@ async def run_worker():
                         pending = await conn.fetchrow("SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2", chat_id, b_id)
                         history_data = pending['order_data'] if pending else "{}"
 
-                        res = await ai.process(text, biz['name'], menu_text, history_data)
+                        res = await ai.process(text, shop_name, menu_text, history_data)
                         
-                        # AI ဆီကရတဲ့ အချက်အလက်သစ်တွေကို Pending မှာ ခေတ္တသိမ်းမယ်
                         if res.get('final_order_data'):
                             await conn.execute("""
                                 INSERT INTO pending_orders (chat_id, business_id, order_data, updated_at)
@@ -127,7 +128,6 @@ async def run_worker():
                                 DO UPDATE SET order_data=$3, updated_at=NOW()
                             """, chat_id, b_id, json.dumps(res['final_order_data']))
 
-                        # အချက်အလက် အစုံအလင် ရပြီဆိုလျှင် အကျဉ်းချုပ်ပြမယ်
                         if res.get('intent') == "confirm_order":
                             items, total = validate(res['final_order_data'].get('items', []), menu_rows)
                             
@@ -148,7 +148,6 @@ async def run_worker():
                             else:
                                 await send(token, chat_id, "❌ ဆိုင်ရဲ့ Menu ထဲက ပစ္စည်းတွေကိုပဲ မှာယူလို့ရပါတယ်။ ဘာများ ထပ်ယူမလဲခင်ဗျာ?")
                         else:
-                            # ပုံမှန် AI စာပြန်စာ
                             reply = res.get('reply_text', "ဟုတ်ကဲ့ခင်ဗျာ။")
                             await send(token, chat_id, reply)
 
