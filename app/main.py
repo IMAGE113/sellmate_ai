@@ -9,12 +9,11 @@ app = FastAPI()
 async def start():
     """
     Server စတက်တာနဲ့ Database ချိတ်မယ်၊ Table တွေဆောက်မယ်၊ 
-    နောက်ကွယ်က Worker ကိုပါ Run မယ်။
+    Background Worker ကို Run မယ်။
     """
     pool = await get_db_pool()
-    # Table တွေ အလိုအလျောက် ဆောက်ပေးမယ့် function
     await init_db(pool)
-    # Background မှာ AI process လုပ်မယ့် Worker ကို run ထားမယ်
+    # Background မှာ task တွေကို စောင့်ကြည့်မယ့် worker ကို run ထားမယ်
     asyncio.create_task(run_worker())
 
 @app.get("/")
@@ -24,52 +23,53 @@ async def root():
 @app.post("/webhook/{token}")
 async def webhook(token: str, request: Request):
     """
-    Telegram Bot ဆီကဝင်လာသမျှ Message တွေကို လက်ခံပြီး 
-    သက်ဆိုင်ရာ ဆိုင်အလိုက် ခွဲခြားသိမ်းဆည်းပေးမယ်။
+    Telegram ဆီကလာတဲ့ message တွေကို လက်ခံပြီး task_queue ထဲ ထည့်ပေးမယ်။
     """
     
-    # 1. Security Check (Render Environment မှာ သတ်မှတ်ထားတဲ့ Secret စစ်မယ်)
+    # 1. Security Check
     expected_secret = os.getenv("TELEGRAM_SECRET_TOKEN")
     secret_received = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
     
     if secret_received != expected_secret:
-        print(f"Unauthorized Access Attempt! Secret mismatch.")
-        raise HTTPException(status_code=403, detail="Forbidden")
+        return {"ok": False, "message": "Unauthorized"}
 
-    # 2. လက်ခံရရှိတဲ့ JSON Data ကိုယူမယ်
+    # 2. Get JSON Data
     data = await request.json()
     pool = await get_db_pool()
 
     async with pool.acquire() as conn:
-        # 3. Database ထဲမှာ ဒီ Bot Token နဲ့ ဆိုင်ရှိမရှိ စစ်မယ်
-        # (Database ထဲမှာ tg_bot_token ဆိုတဲ့ column ရှိနေရပါမယ်)
+        # 3. Token နဲ့ ဆိုင်ကို ရှာမယ်
         biz = await conn.fetchrow("SELECT id FROM businesses WHERE tg_bot_token=$1", token)
         
         if not biz:
-            print(f"Alert: Bot token {token} is not registered in our database!")
-            return {"ok": False, "error": "Business not found"}
+            return {"ok": False, "error": "Business not registered"}
         
         business_id = biz['id']
 
-        # 4. Message data မပါရင် ကျော်မယ် (ဥပမာ- Edited messages တွေဆိုရင်)
+        # 4. Message ပါမပါ စစ်မယ်
         if "message" not in data or "text" not in data["message"]:
             return {"ok": True}
 
-        chat_id = str(data["message"]["chat"]["id"])
-        text = data["message"].get("text", "")
+        # 🔥 အရေးကြီးဆုံးအချက် - chat_id ကို integer (ဂဏန်း) အဖြစ် ပြောင်းသိမ်းမယ်
+        try:
+            chat_id = int(data["message"]["chat"]["id"])
+            text = data["message"].get("text", "")
+        except (KeyError, ValueError):
+            return {"ok": False, "error": "Invalid data format"}
 
-        # 5. Message တစ်ခုတည်း ခဏခဏ Duplicate မဖြစ်အောင် Hash လုပ်မယ်
+        # 5. Duplicate မဖြစ်အောင် Hash လုပ်မယ်
         h = hashlib.md5(f"{business_id}:{chat_id}:{text}".encode()).hexdigest()
 
-        # 6. Task Queue ထဲကို သိမ်းမယ် (Worker က ဒါကိုကြည့်ပြီး AI နဲ့ ဆက်သွယ်ပေးမှာပါ)
+        # 6. Task Queue ထဲ ထည့်မယ်
+        # user_text နဲ့ business_id column တွေကို သုံးထားပါတယ်
         try:
             await conn.execute("""
-                INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO task_queue (business_id, chat_id, user_text, request_hash, status)
+                VALUES ($1, $2, $3, $4, 'pending')
                 ON CONFLICT (request_hash) DO NOTHING
             """, business_id, chat_id, text, h)
         except Exception as e:
-            print(f"Database Error: {e}")
-            return {"ok": False, "error": "Queue insertion failed"}
+            print(f"Database Insertion Error: {e}")
+            return {"ok": False, "error": "Failed to queue task"}
 
     return {"ok": True}
