@@ -1,57 +1,43 @@
-import hashlib
-import logging
-import asyncio
-import threading
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from .database import get_db_pool, init_db
 from .worker import run_worker
+import hashlib, asyncio, os
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+app = FastAPI()
 
-def start_worker_thread():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(run_worker())
-    except Exception as e:
-        logger.error(f"❌ Worker Thread Crash: {e}")
+@app.on_event("startup")
+async def start():
+    pool = await get_db_pool()
+    await init_db(pool)
+    asyncio.create_task(run_worker())
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    app.state.pool = await get_db_pool(for_worker=False)
-    await init_db(app.state.pool)
-    worker_thread = threading.Thread(target=start_worker_thread, daemon=True)
-    worker_thread.start()
-    logger.info("🚀 SaaS Webhook & Worker Started.")
-    yield
-    if hasattr(app.state, "pool"):
-        await app.state.pool.close()
+@app.post("/webhook/{token}")
+async def webhook(token: str, request: Request):
 
-app = FastAPI(lifespan=lifespan)
+    if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != os.getenv("TELEGRAM_SECRET_TOKEN"):
+        raise HTTPException(403)
 
-@app.post("/webhook/telegram")
-async def telegram_webhook(req: Request):
-    try:
-        data = await req.json()
-        msg = data.get("message", {})
-        text = msg.get("text")
-        chat_id = str(msg.get("chat", {}).get("id"))
-        message_id = msg.get("message_id")
+    data = await request.json()
+    pool = await get_db_pool()
 
-        if text and chat_id:
-            req_hash = hashlib.md5(f"{chat_id}:{message_id}".encode()).hexdigest()
-            async with app.state.pool.acquire() as conn:
-                # မှတ်ချက် - လက်တွေ့မှာ bot_token ပေါ်မူတည်ပြီး business_id ကို ရှာရမှာပါ
-                # လောလောဆယ် ID = 1 လို့ပဲ ထားထားပါတယ်
-                await conn.execute(
-                    "INSERT INTO task_queue (business_id, chat_id, user_text, request_hash) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                    1, chat_id, text, req_hash
-                )
-    except Exception as e:
-        logger.error(f"Webhook Error: {e}")
+    async with pool.acquire() as conn:
+        biz = await conn.fetchrow("SELECT id FROM businesses WHERE tg_bot_token=$1", token)
+        if not biz:
+            return {"ok": False}
+        b_id = biz['id']
+
+        if "message" not in data:
+            return {"ok": True}
+
+        chat_id = str(data["message"]["chat"]["id"])
+        text = data["message"].get("text","")
+
+        h = hashlib.md5(f"{b_id}:{chat_id}:{text}".encode()).hexdigest()
+
+        await conn.execute("""
+        INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
+        VALUES ($1,$2,$3,$4)
+        ON CONFLICT DO NOTHING
+        """, b_id, chat_id, text, h)
+
     return {"ok": True}
-
-@app.get("/")
-async def root(): return {"status": "SaaS Running"}
