@@ -1,21 +1,18 @@
 import os, json, asyncio, time, httpx, re
 from google import genai
 from google.genai import types
-from openai import AsyncOpenAI
 
+# Global HTTP Client for Groq API
 http_client = httpx.AsyncClient(timeout=15.0)
 
 class AI:
     def __init__(self):
-        # OpenAI Client Initialize
-        self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        # Status Tracking
-        self.openai_ok = True
+        # API Status Tracking
+        self.groq_ok = True
         self.gemini_ok = True
-        self.last_openai_fail = 0
+        self.last_groq_fail = 0
         self.last_gemini_fail = 0
-        self.cooldown = 300 # 5 မိနစ်နားမယ်
+        self.cooldown = 300 # Error တက်ရင် ၅ မိနစ် နားမယ်
 
     def safe_parse(self, text, history_str):
         try:
@@ -24,7 +21,7 @@ class AI:
             prev_data = {}
 
         try:
-            # Markdown JSON block ဖယ်ရှားခြင်း
+            # JSON block တွေကို သန့်စင်ခြင်း
             text = re.sub(r"```json\s*|```", "", text).strip()
             start = text.find('{')
             end = text.rfind('}')
@@ -34,14 +31,14 @@ class AI:
             data = json.loads(text)
             new_final_data = data.get("final_order_data", {})
             
-            # Data Merge logic
+            # Data merging logic (ယခင်ရှိပြီးသား data တွေ မပျောက်အောင်)
             merged_data = {
                 "customer_name": new_final_data.get("customer_name") or prev_data.get("customer_name", ""),
                 "phone_no": new_final_data.get("phone_no") or prev_data.get("phone_no", ""),
                 "address": new_final_data.get("address") or prev_data.get("address", ""),
                 "payment_method": new_final_data.get("payment_method") or prev_data.get("payment_method", ""),
                 "items": new_final_data.get("items") if new_final_data.get("items") else prev_data.get("items", []),
-                "total_price": 0 # Worker ဘက်မှာပဲ တွက်မယ်
+                "total_price": 0 # Worker ဘက်တွင် စျေးနှုန်းအတိအကျ ပြန်တွက်မည်
             }
 
             return {
@@ -49,32 +46,43 @@ class AI:
                 "intent": data.get("intent", "info_gathering"),
                 "final_order_data": merged_data
             }
-        except Exception:
+        except Exception as e:
+            print(f"Parse Error: {e}")
             return {"reply_text": "စနစ် အနည်းငယ် အလုပ်ရှုပ်နေလို့ပါ။", "intent": "info_gathering", "final_order_data": prev_data}
 
     def prompt(self, shop, menu, history):
         return f"""
-You are "SellMate AI", a professional waiter for "{shop}". 
-Tone: Polite Myanmar language ("ဗျာ/ခင်ဗျာ").
+[SYSTEM ROLE]
+You are a highly efficient Order-Taking Assistant for "{shop}". 
+Your ONLY goal is to extract order details into a structured JSON format. 
+Language: Myanmar (Polite, using ဗျာ/ခင်ဗျာ).
 
-[STRICT MENU RULE]
-- ONLY items from the [SHOP MENU] below are available. 
-- Product names must be English as listed.
-
-[OBJECTIVE]
-Collect: Items & Qty, Name, Phone, Address, Payment Method.
-Ask ONE detail at a time. Be concise.
-
-[HISTORY]
-{history}
-
-[SHOP MENU]
+[SHOP MENU - ONLY RECOMMEND THESE]
 {menu}
 
-[OUTPUT FORMAT - JSON ONLY]
+[ORDER GATHERING RULES - CRITICAL]
+1. CHECK HISTORY: Do not ask for information already present in [HISTORY].
+2. ONE AT A TIME: Ask for missing details one by one (e.g., if items are known, ask for Name).
+3. MENU ONLY: If a user orders something NOT in the menu, politely say it's unavailable and suggest an item from the menu.
+4. CONFIRMATION: Once ALL details (Items/Qty, Name, Phone, Address, Payment) are collected, set "intent" to "confirm_order".
+5. RESET: If user says "clear", "cancel", "အကုန်ဖျက်", or "ပြန်မှာမယ်", return empty fields in final_order_data.
+
+[CURRENT HISTORY]
+{history}
+
+[REQUIRED FIELDS]
+- items: List of objects with "name" (as in menu) and "qty".
+- customer_name: Full name.
+- phone_no: Valid phone number.
+- address: Delivery location.
+- payment_method: Must be "COD" or "Pre-paid".
+
+[OUTPUT INSTRUCTION]
+Respond ONLY with a valid JSON object. No conversational filler outside the JSON.
+
 {{
- "reply_text": "မြန်မာလို ပြန်စာ",
- "intent": "info_gathering" or "confirm_order",
+ "reply_text": "Your polite response in Myanmar",
+ "intent": "info_gathering" OR "confirm_order",
  "final_order_data": {{
     "customer_name": "...", 
     "phone_no": "...", 
@@ -89,21 +97,28 @@ Ask ONE detail at a time. Be concise.
         full_prompt = self.prompt(shop, menu, history)
         now = time.time()
 
-        # 1. Try OpenAI (Primary)
-        if self.openai_ok or (now - self.last_openai_fail > self.cooldown):
+        # 1. Try Groq (Primary - Free & Fast)
+        if self.groq_ok or (now - self.last_groq_fail > self.cooldown):
             try:
-                response = await self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "system", "content": full_prompt}, {"role": "user", "content": text}],
-                    response_format={"type": "json_object"},
-                    temperature=0.1
+                res = await http_client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [{"role": "system", "content": full_prompt}, {"role": "user", "content": text}],
+                        "temperature": 0.1,
+                        "response_format": {"type": "json_object"}
+                    }
                 )
-                self.openai_ok = True
-                return self.safe_parse(response.choices[0].message.content, history)
+                if res.status_code == 200:
+                    self.groq_ok = True
+                    return self.safe_parse(res.json()['choices'][0]['message']['content'], history)
+                else:
+                    raise Exception(f"Groq Error Status: {res.status_code}")
             except Exception as e:
-                print(f"OpenAI Failed, switching to Gemini... {e}")
-                self.openai_ok = False
-                self.last_openai_fail = now
+                print(f"Groq Failed, switching to Gemini... {e}")
+                self.groq_ok = False
+                self.last_groq_fail = now
 
         # 2. Try Gemini (Secondary Backup)
         if self.gemini_ok or (now - self.last_gemini_fail > self.cooldown):
@@ -118,27 +133,10 @@ Ask ONE detail at a time. Be concise.
                 self.gemini_ok = True
                 return self.safe_parse(res.text, history)
             except Exception as e:
-                print(f"Gemini Failed, switching to Groq... {e}")
+                print(f"Gemini Backup Failed too... {e}")
                 self.gemini_ok = False
                 self.last_gemini_fail = now
 
-        # 3. Try Groq (Final Resort)
-        return await self.groq(full_prompt, text, history)
-
-    async def groq(self, full_prompt, text, history):
-        try:
-            res = await http_client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [{"role": "system", "content": full_prompt}, {"role": "user", "content": text}],
-                    "temperature": 0.1,
-                    "response_format": {"type": "json_object"}
-                }
-            )
-            return self.safe_parse(res.json()['choices'][0]['message']['content'], history)
-        except Exception:
-            return {"reply_text": "ခဏနေမှ ပြန်ပြောပေးပါဗျာ။", "intent": "info_gathering", "final_order_data": {}}
+        return {"reply_text": "ခဏနေမှ ပြန်ပြောပေးပါဗျာ။", "intent": "info_gathering", "final_order_data": {}}
 
 ai = AI()
