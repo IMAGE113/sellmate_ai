@@ -29,16 +29,17 @@ async def get_db_pool(for_worker=False):
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        # Businesses Table
+        # 1. Businesses Table (Bot Token တွေကို ဒီမှာသိမ်းမယ်)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
             shop_name TEXT,
-            tg_bot_token TEXT UNIQUE
+            tg_bot_token TEXT UNIQUE,
+            created_at TIMESTAMP DEFAULT NOW()
         );
         """)
 
-        # Products Table
+        # 2. Products Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS products (
             id SERIAL PRIMARY KEY,
@@ -48,7 +49,7 @@ async def init_db(pool):
         );
         """)
 
-        # Orders Table
+        # 3. Orders Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
@@ -63,7 +64,7 @@ async def init_db(pool):
         );
         """)
 
-        # Pending Orders Table
+        # 4. Pending Orders Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS pending_orders (
             chat_id TEXT,
@@ -74,7 +75,7 @@ async def init_db(pool):
         );
         """)
 
-        # Task Queue Table (Worker အတွက် Column အပြည့်အစုံနဲ့)
+        # 5. Task Queue Table (Worker အတွက် Column အပြည့်အစုံနဲ့)
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS task_queue (
             id SERIAL PRIMARY KEY,
@@ -89,3 +90,5 @@ async def init_db(pool):
             updated_at TIMESTAMP DEFAULT NOW()
         );
         """)
+        
+        logger.info("All tables initialized successfully.")
