@@ -7,12 +7,13 @@ import asyncpg
 from .database import get_db_pool
 from .ai import ai
 
-# Global HTTP Client (Timeout ကို ၁၅ စက္ကန့်ထိ တိုးထားပါတယ်)
+# Global HTTP Client
 http_client = httpx.AsyncClient(timeout=15.0)
 
 async def send(token, chat_id, text):
     try:
-        # Markdown parsing error မတက်အောင် သတိထားရမယ်
+        # Markdown parsing error မတက်အောင် ရှင်းထားတဲ့ စာသားကို သုံးမယ်
+        # အထူးသဖြင့် _ * [ ] ( ) စတာတွေကို AI က မှားသုံးတတ်လို့ပါ
         await http_client.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
             json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
@@ -52,7 +53,6 @@ async def run_worker():
     while True:
         try:
             async with pool.acquire() as conn:
-                # Task ယူမယ့် SQL (Attempts စစ်ထားတယ်)
                 task = await conn.fetchrow("""
                     UPDATE task_queue 
                     SET status='processing', attempts = attempts + 1, updated_at = NOW()
@@ -108,14 +108,17 @@ async def run_worker():
 
                     # --- Logic B: AI Processing ---
                     else:
-                        menu = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
-                        menu_text = "\n".join([f"- {m['name']}: {m['price']} MMK" for m in menu])
+                        menu_rows = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
+                        menu_text = "\n".join([f"- {m['name']}: {m['price']} MMK" for m in menu_rows])
                         
                         pending = await conn.fetchrow("SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2", chat_id, b_id)
-                        history = pending['order_data'] if pending else "{}"
+                        
+                        # ဒီနေရာက အရေးကြီးဆုံးပါ - history ကို string မဟုတ်ဘဲ clean json ဖြစ်အောင် လုပ်တာပါ
+                        history_data = "{}"
+                        if pending and pending['order_data']:
+                            history_data = pending['order_data']
 
-                        # AI ကို ခေါ်မယ် (ဒီမှာ Stuck ဖြစ်နိုင်ခြေအများဆုံးပဲ)
-                        res = await ai.process(text, biz['shop_name'], menu_text, history)
+                        res = await ai.process(text, biz['shop_name'], menu_text, history_data)
                         
                         print(f"DEBUG: AI Intent -> {res.get('intent')}")
 
@@ -130,17 +133,21 @@ async def run_worker():
 
                         # Intent အလိုက် စာပြန်မယ်
                         if res.get('intent') == "confirm_order":
-                            items, total = validate(res['final_order_data'].get('items', []), menu)
+                            items, total = validate(res['final_order_data'].get('items', []), menu_rows)
                             
                             if items:
-                                summary = f"📝 **အော်ဒါ အကျဉ်းချုပ်**\n\n"
-                                summary += f"👤 အမည်: {res['final_order_data'].get('customer_name')}\n"
-                                summary += f"📞 ဖုန်း: {res['final_order_data'].get('phone_no')}\n"
-                                summary += f"📍 လိပ်စာ: {res['final_order_data'].get('address')}\n"
-                                summary += f"--- မှာယူသည့်ပစ္စည်းများ ---\n"
+                                # စာသားတွေကို Markdown safe ဖြစ်အောင် လုပ်ပေးမယ်
+                                summary = (
+                                    f"📝 *အော်ဒါ အကျဉ်းချုပ်*\n\n"
+                                    f"👤 အမည်: {res['final_order_data'].get('customer_name')}\n"
+                                    f"📞 ဖုန်း: {res['final_order_data'].get('phone_no')}\n"
+                                    f"📍 လိပ်စာ: {res['final_order_data'].get('address')}\n"
+                                    f"----------------------\n"
+                                )
                                 for item in items:
                                     summary += f"- {item['name']} x {item['qty']} ({item['price'] * item['qty']} ကျပ်)\n"
-                                summary += f"\n💰 **စုစုပေါင်း: {total} MMK**\n\nအတည်ပြုရန် 'CONFIRM' ဟု ပြန်ပို့ပေးပါခင်ဗျာ။"
+                                
+                                summary += f"\n💰 *စုစုပေါင်း: {total} MMK*\n\nအတည်ပြုရန် 'CONFIRM' ဟု ပြန်ပို့ပေးပါခင်ဗျာ။"
                                 await send(token, chat_id, summary)
                             else:
                                 await send(token, chat_id, "❌ ဆိုင်ရဲ့ Menu ထဲက ပစ္စည်းတွေကိုပဲ မှာယူလို့ရပါတယ်။ ဘာများ ထပ်ယူမလဲခင်ဗျာ?")
@@ -148,7 +155,7 @@ async def run_worker():
                             reply = res.get('reply_text', "နားမလည်လို့ပါခင်ဗျာ။ ပြန်ပြောပြပေးပါဦး။")
                             await send(token, chat_id, reply)
 
-                    # အောင်မြင်ရင် task ကို 'done' လုပ်မယ်
+                    # Task Done
                     await conn.execute("UPDATE task_queue SET status='done', updated_at = NOW() WHERE id=$1", task['id'])
                     print(f"DEBUG: Task {task['id']} finished successfully.")
 
