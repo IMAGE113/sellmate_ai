@@ -1,59 +1,95 @@
-import asyncio, json, logging, os, httpx
-from .ai import ai_service
+import asyncio, json, hashlib, os, httpx, time
 from .database import get_db_pool
+from .ai import ai
 
-async def send_tg(chat_id, text):
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    async with httpx.AsyncClient() as client:
-        await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
+http_client = httpx.AsyncClient(timeout=10.0)
+
+async def send(token, chat_id, text):
+    await http_client.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json={"chat_id": chat_id, "text": text},
+        timeout=10
+    )
+
+def validate(items, menu):
+    valid = []
+    total = 0
+    for i in items:
+        for m in menu:
+            if m['name'].lower() == i.get('name','').lower():
+                qty = max(1, int(i.get('qty',1)))
+                valid.append({"name": m['name'], "qty": qty, "price": m['price']})
+                total += qty*m['price']
+    return valid, total
 
 async def run_worker():
     pool = await get_db_pool(for_worker=True)
+
     while True:
-        try:
-            async with pool.acquire() as conn:
-                task = await conn.fetchrow("""
-                    UPDATE task_queue SET status='processing'
-                    WHERE id = (SELECT id FROM task_queue WHERE status='pending' 
-                                ORDER BY id ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
-                    RETURNING *
-                """)
+        async with pool.acquire() as conn:
+            task = await conn.fetchrow("""
+            UPDATE task_queue SET status='processing'
+            WHERE id = (
+                SELECT id FROM task_queue WHERE status='pending'
+                LIMIT 1 FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            """)
 
-                if task:
-                    biz_id, chat_id, user_text = task['business_id'], task['chat_id'], task['user_text']
-                    
-                    shop = await conn.fetchrow("SELECT shop_name FROM businesses WHERE id=$1", biz_id)
-                    products_raw = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", biz_id)
-                    
-                    # Error Fixed: ပိုမှန်ကန်သော list conversion
-                    menu_list = [{"name": p['name'], "price": p['price']} for p in products_raw]
-                    
-                    ai_res = await ai_service.process_chat(user_text, chat_id, shop['shop_name'], menu_list)
-                    intent = ai_res.get("intent")
+            if not task:
+                await asyncio.sleep(1)
+                continue
 
-                    if intent == "confirm_order":
-                        s = ai_res.get("order_summary")
-                        msg = (f"<b>📝 အော်ဒါအတည်ပြုပေးပါ</b>\n\n"
-                               f"👤 အမည်: {s['name']}\n📞 ဖုန်း: {s['phone']}\n📍 လိပ်စာ: {s['address']}\n"
-                               f"🛍️ မှာယူသည်: {s['items_text']}\n\n"
-                               f"အချက်အလက်မှန်ကန်ပါက <b>'Confirm'</b> ဟု ပြောပေးပါခင်ဗျာ။")
-                        await send_tg(chat_id, msg)
-                    
-                    elif intent == "save_to_db":
-                        d = ai_res.get("final_order_data")
-                        await conn.execute("""
-                            INSERT INTO orders (business_id, customer_name, phone_no, address, items, total_price)
-                            VALUES ($1, $2, $3, $4, $5, $6)
-                        """, biz_id, d['name'], d['phone'], d['address'], json.dumps(d['items']), d['total'])
-                        await send_tg(chat_id, "✅ အော်ဒါတင်ခြင်း အောင်မြင်ပါသည်။ ကျေးဇူးတင်ပါတယ်!")
-                    
+            b_id, chat_id, text = task['business_id'], task['chat_id'], task['user_text']
+            biz = await conn.fetchrow("SELECT * FROM businesses WHERE id=$1", b_id)
+
+            try:
+                if text == "CONFIRM":
+                    async with conn.transaction():
+                        row = await conn.fetchrow("""
+                        DELETE FROM pending_orders
+                        WHERE chat_id=$1 AND business_id=$2
+                        RETURNING order_data
+                        """, chat_id, b_id)
+
+                        if row:
+                            d = json.loads(row['order_data'])
+                            h = hashlib.md5(str(d).encode()).hexdigest()
+
+                            await conn.execute("""
+                            INSERT INTO orders (business_id,customer_name,phone_no,address,items,total_price,order_hash)
+                            VALUES ($1,$2,$3,$4,$5,$6,$7)
+                            ON CONFLICT DO NOTHING
+                            """, b_id, d['name'], d['phone'], d['address'],
+                                 json.dumps(d['items']), d['total'], h)
+
+                            await send(biz['tg_bot_token'], chat_id, "✅ Order confirmed")
+
+                else:
+                    menu = await conn.fetch("SELECT name,price FROM products WHERE business_id=$1", b_id)
+                    res = await ai.process(text, biz['shop_name'], menu)
+
+                    if res['intent'] == "confirm_order":
+                        items, total = validate(res['final_order_data']['items'], menu)
+                        if items:
+                            res['final_order_data']['items'] = items
+                            res['final_order_data']['total'] = total
+
+                            await conn.execute("""
+                            INSERT INTO pending_orders (chat_id,business_id,order_data)
+                            VALUES ($1,$2,$3)
+                            ON CONFLICT (chat_id,business_id) DO UPDATE SET order_data=$3
+                            """, chat_id, b_id, json.dumps(res['final_order_data']))
+
+                            await send(biz['tg_bot_token'], chat_id, "Confirm? type CONFIRM")
+                        else:
+                            await send(biz['tg_bot_token'], chat_id, "Invalid items")
+
                     else:
-                        await send_tg(chat_id, ai_res.get("reply_text"))
+                        await send(biz['tg_bot_token'], chat_id, res['reply_text'])
 
-                    await conn.execute("UPDATE task_queue SET status='completed' WHERE id=$1", task['id'])
+                await conn.execute("UPDATE task_queue SET status='done' WHERE id=$1", task['id'])
 
-            await asyncio.sleep(2)
-        except Exception as e:
-            logging.error(f"Worker Error: {e}")
-            await asyncio.sleep(5)
+            except Exception:
+                await conn.execute("UPDATE task_queue SET status='pending' WHERE id=$1", task['id'])
+                await asyncio.sleep(2)
