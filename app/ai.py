@@ -12,7 +12,7 @@ class AI:
         self.gemini_ok = True
         self.last_groq_fail = 0
         self.last_gemini_fail = 0
-        self.cooldown = 300 # Error တက်ရင် ၅ မိနစ် နားမယ်
+        self.cooldown = 300 
 
     def safe_parse(self, text, history_str):
         try:
@@ -21,7 +21,6 @@ class AI:
             prev_data = {}
 
         try:
-            # JSON block တွေကို သန့်စင်ခြင်း
             text = re.sub(r"```json\s*|```", "", text).strip()
             start = text.find('{')
             end = text.rfind('}')
@@ -31,14 +30,13 @@ class AI:
             data = json.loads(text)
             new_final_data = data.get("final_order_data", {})
             
-            # Data merging logic (ယခင်ရှိပြီးသား data တွေ မပျောက်အောင်)
             merged_data = {
                 "customer_name": new_final_data.get("customer_name") or prev_data.get("customer_name", ""),
                 "phone_no": new_final_data.get("phone_no") or prev_data.get("phone_no", ""),
                 "address": new_final_data.get("address") or prev_data.get("address", ""),
                 "payment_method": new_final_data.get("payment_method") or prev_data.get("payment_method", ""),
                 "items": new_final_data.get("items") if new_final_data.get("items") else prev_data.get("items", []),
-                "total_price": 0 # Worker ဘက်တွင် စျေးနှုန်းအတိအကျ ပြန်တွက်မည်
+                "total_price": 0 
             }
 
             return {
@@ -47,7 +45,6 @@ class AI:
                 "final_order_data": merged_data
             }
         except Exception as e:
-            print(f"Parse Error: {e}")
             return {"reply_text": "စနစ် အနည်းငယ် အလုပ်ရှုပ်နေလို့ပါ။", "intent": "info_gathering", "final_order_data": prev_data}
 
     def prompt(self, shop, menu, history):
@@ -62,26 +59,23 @@ Language: Myanmar (Polite, using ဗျာ/ခင်ဗျာ).
 
 [ORDER GATHERING RULES - CRITICAL]
 1. CHECK HISTORY: Do not ask for information already present in [HISTORY].
-2. ONE AT A TIME: Ask for missing details one by one (e.g., if items are known, ask for Name).
-3. MENU ONLY: If a user orders something NOT in the menu, politely say it's unavailable and suggest an item from the menu.
-4. CONFIRMATION: Once ALL details (Items/Qty, Name, Phone, Address, Payment) are collected, set "intent" to "confirm_order".
-5. RESET: If user says "clear", "cancel", "အကုန်ဖျက်", or "ပြန်မှာမယ်", return empty fields in final_order_data.
+2. ONE AT A TIME: Ask for missing details one by one.
+3. MENU ONLY: If a user orders something NOT in the menu, politely say it's unavailable.
+4. CONFIRMATION: Once ALL details are collected, set "intent" to "confirm_order".
+5. RESET: If user says "clear", "cancel", "အကုန်ဖျက်", or "ပြန်မှာမယ်", return empty fields.
 
 [CURRENT HISTORY]
 {history}
 
 [REQUIRED FIELDS]
-- items: List of objects with "name" (as in menu) and "qty".
-- customer_name: Full name.
-- phone_no: Valid phone number.
-- address: Delivery location.
-- payment_method: Must be "COD" or "Pre-paid".
+- items: List of objects with "name" and "qty".
+- customer_name, phone_no, address, payment_method.
 
 [OUTPUT INSTRUCTION]
-Respond ONLY with a valid JSON object. No conversational filler outside the JSON.
+Respond ONLY with a valid JSON object.
 
 {{
- "reply_text": "Your polite response in Myanmar",
+ "reply_text": "Your response in Myanmar",
  "intent": "info_gathering" OR "confirm_order",
  "final_order_data": {{
     "customer_name": "...", 
@@ -97,7 +91,7 @@ Respond ONLY with a valid JSON object. No conversational filler outside the JSON
         full_prompt = self.prompt(shop, menu, history)
         now = time.time()
 
-        # 1. Try Groq (Primary - Free & Fast)
+        # 1. Try Groq (Primary)
         if self.groq_ok or (now - self.last_groq_fail > self.cooldown):
             try:
                 res = await http_client.post(
@@ -114,13 +108,13 @@ Respond ONLY with a valid JSON object. No conversational filler outside the JSON
                     self.groq_ok = True
                     return self.safe_parse(res.json()['choices'][0]['message']['content'], history)
                 else:
-                    raise Exception(f"Groq Error Status: {res.status_code}")
+                    raise Exception(f"Groq Error: {res.status_code}")
             except Exception as e:
-                print(f"Groq Failed, switching to Gemini... {e}")
+                print(f"Groq Failed: {e}")
                 self.groq_ok = False
                 self.last_groq_fail = now
 
-        # 2. Try Gemini (Secondary Backup)
+        # 2. Try Gemini (Backup)
         if self.gemini_ok or (now - self.last_gemini_fail > self.cooldown):
             try:
                 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
@@ -133,7 +127,7 @@ Respond ONLY with a valid JSON object. No conversational filler outside the JSON
                 self.gemini_ok = True
                 return self.safe_parse(res.text, history)
             except Exception as e:
-                print(f"Gemini Backup Failed too... {e}")
+                print(f"Gemini Backup Failed: {e}")
                 self.gemini_ok = False
                 self.last_gemini_fail = now
 
