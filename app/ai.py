@@ -2,18 +2,19 @@ import os, json, asyncio, time, httpx, re
 from google import genai
 from google.genai import types
 
-# Timeout ကို ၁၅ စက္ကန့်ထိ တိုးထားပေးပါတယ်
+# Timeout ကို ၁၅ စက္ကန့်ထိ ထားရှိခြင်း
 http_client = httpx.AsyncClient(timeout=15.0)
 
 class AI:
     def __init__(self):
         self.gemini_ok = True
         self.last_fail = 0
-        self.cooldown_period = 300  # 5 minutes cooldown
+        self.cooldown_period = 300 
 
     def safe_parse(self, text):
         """AI ပြန်ပေးတဲ့ စာသားထဲကနေ JSON ကို သန့်သန့်လေး ဆွဲထုတ်မယ်"""
         try:
+            # Markdown code blocks များကို ဖယ်ထုတ်ခြင်း
             text = re.sub(r"```json\s*|```", "", text).strip()
             start = text.find('{')
             end = text.rfind('}')
@@ -22,7 +23,7 @@ class AI:
             
             data = json.loads(text)
             
-            # Data Validation: အကယ်၍ data ထဲမှာ reply_text မပါရင် default စာထည့်မယ်
+            # Default structure တည်ဆောက်ခြင်း
             return {
                 "reply_text": data.get("reply_text", "ဟုတ်ကဲ့ခင်ဗျာ၊ ဘာများ ထပ်ကူညီပေးရမလဲ?"),
                 "intent": data.get("intent", "info_gathering"),
@@ -43,24 +44,25 @@ class AI:
             }
 
     def prompt(self, shop, menu, history):
-        # ဤနေရာတွင် logic ကို ပိုမိုတင်းကျပ်စွာ ရေးသားထားသည်
+        # ဤနေရာတွင် Logic ကို အဆင့်ဆင့် စစ်ဆေးရန် ပြင်ဆင်ထားသည်
         return f"""
 You are "SellMate AI", an expert Myanmar shop assistant for "{shop}". 
 
-[GOAL]
-Your goal is to collect Name, Phone, and Address for the order.
+[STRICT PRIORITY RULES]
+1. IF the user asks for something NOT in the [SHOP MENU] (e.g., Tea), politely say it's not available and suggest items from the menu.
+2. IF the user mentions an item from the menu (e.g., Latte), confirm it and add to "items" immediately.
+3. DO NOT ask for Customer Name, Phone, or Address until the user has chosen at least one valid item from the menu.
+4. If "items" is empty, your ONLY goal is to help them choose from the menu.
 
-[STRICT INSTRUCTIONS TO AVOID LOOPS]
-1. Read the [CURRENT DATA] carefully. 
-2. If "customer_name" has a value, NEVER ask for the name again.
-3. If "phone_no" has a value, NEVER ask for the phone number again.
-4. If "address" has a value, NEVER ask for the address again.
-5. ONLY ASK FOR ONE MISSING ITEM AT A TIME.
+[LOOP PREVENTION]
+- Check [CURRENT DATA] (History) before asking any questions.
+- If "customer_name" exists, DO NOT ask for it.
+- If "phone_no" exists, DO NOT ask for it.
+- If "address" exists, DO NOT ask for it.
 
-[CONVERSATION GUIDELINES]
-- Speak in natural, friendly Myanmar "Spoken" style (e.g., "ဟုတ်ကဲ့ခင်ဗျာ", "ကျေးဇူးပြုပြီး... ပေးပါဦးဗျ")
-- Do NOT use robotic or overly formal Burmese.
-- If the user provides info, acknowledge it first, then ask for the next.
+[STYLE]
+- Use natural spoken Myanmar (e.g., "ဟုတ်ကဲ့ခင်ဗျာ၊ Latte တစ်ခွက် မှတ်ထားပေးပါတယ်ဗျ။")
+- Be concise. Don't repeat greeting.
 
 [SHOP MENU]
 {menu}
@@ -68,40 +70,41 @@ Your goal is to collect Name, Phone, and Address for the order.
 [CURRENT DATA (FROM HISTORY)]
 {history}
 
-[OUTPUT FORMAT - ALWAYS RETURN JSON]
+[OUTPUT FORMAT - ALWAYS RETURN VALID JSON]
 {{
- "reply_text": "Your natural Myanmar response",
- "intent": "info_gathering" (if still missing info) OR "confirm_order" (if all info exists),
+ "reply_text": "Myanmar response",
+ "intent": "info_gathering" OR "confirm_order",
  "final_order_data": {{
-    "customer_name": "Update if provided",
-    "phone_no": "Update if provided",
-    "address": "Update if provided",
-    "items": "Update based on user request",
-    "total_price": "Calculate based on menu"
+    "customer_name": "string",
+    "phone_no": "string",
+    "address": "string",
+    "items": [{{ "name": "item_name", "qty": 1 }}],
+    "total_price": 0
  }}
 }}
 """
 
     async def process(self, text, shop, menu, history="{}"):
-        # History ထဲမှာ data မရှိရင် empty string ဖြစ်နေတတ်လို့ format ပြန်လုပ်မယ်
         if not history or history == "null":
             history = "{}"
             
         full_prompt = self.prompt(shop, menu, history)
         current_time = time.time()
 
+        # Cooldown logic for Gemini
         if not self.gemini_ok and (current_time - self.last_fail < self.cooldown_period):
             return await self.groq(full_prompt, text)
 
         try:
             client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+            # Gemini Prompting
             res = await asyncio.to_thread(
                 client.models.generate_content,
                 model="gemini-2.0-flash",
                 contents=full_prompt + f"\nUser Input: {text}",
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    temperature=0.1 # ပိုတိကျအောင် temperature ကို ထပ်လျှော့ထားတယ်
+                    temperature=0.1
                 )
             )
             self.gemini_ok = True
@@ -109,12 +112,13 @@ Your goal is to collect Name, Phone, and Address for the order.
 
         except Exception as e:
             print(f"DEBUG: Gemini Error: {e}")
-            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            if any(err in str(e) for err in ["429", "RESOURCE_EXHAUSTED", "Quota"]):
                 self.gemini_ok = False
                 self.last_fail = current_time
             return await self.groq(full_prompt, text)
 
     async def groq(self, full_prompt, text):
+        """Gemini အလုပ်မလုပ်ပါက Groq Llama-3 သို့ ပြောင်းသုံးခြင်း"""
         try:
             res = await http_client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
@@ -130,9 +134,16 @@ Your goal is to collect Name, Phone, and Address for the order.
                 }
             )
             data = res.json()
-            return self.safe_parse(data['choices'][0]['message']['content'])
+            if 'choices' in data:
+                return self.safe_parse(data['choices'][0]['message']['content'])
+            else:
+                raise Exception(f"Groq API Error: {data}")
         except Exception as e:
             print(f"DEBUG: Groq Error: {e}")
-            return {"reply_text": "ခေတ္တစောင့်ဆိုင်းပေးပါခင်ဗျာ။", "intent": "info_gathering", "final_order_data": {}}
+            return {
+                "reply_text": "ခေတ္တစောင့်ဆိုင်းပေးပါခင်ဗျာ။ စနစ်ပြင်ဆင်နေပါတယ်။", 
+                "intent": "info_gathering", 
+                "final_order_data": {}
+            }
 
 ai = AI()
