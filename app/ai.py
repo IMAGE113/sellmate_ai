@@ -17,7 +17,6 @@ class AI:
             prev_data = {}
 
         try:
-            # Markdown code blocks တွေကို ဖယ်ရှားခြင်း
             text = re.sub(r"```json\s*|```", "", text).strip()
             start = text.find('{')
             end = text.rfind('}')
@@ -27,14 +26,14 @@ class AI:
             
             new_final_data = data.get("final_order_data", {})
             
-            # 🔥 Multi-tenant Data Merge: အချက်အလက်တွေ တစ်ခုနဲ့တစ်ခု မပျောက်အောင် ပေါင်းပေးခြင်း
+            # Data Merge logic
             merged_data = {
                 "customer_name": new_final_data.get("customer_name") or prev_data.get("customer_name", ""),
                 "phone_no": new_final_data.get("phone_no") or prev_data.get("phone_no", ""),
                 "address": new_final_data.get("address") or prev_data.get("address", ""),
                 "payment_method": new_final_data.get("payment_method") or prev_data.get("payment_method", ""),
                 "items": new_final_data.get("items") if new_final_data.get("items") else prev_data.get("items", []),
-                "total_price": new_final_data.get("total_price") or prev_data.get("total_price", 0)
+                "total_price": 0 # total_price ကို worker ဘက်မှာပဲ တွက်မယ်
             }
 
             return {
@@ -42,7 +41,7 @@ class AI:
                 "intent": data.get("intent", "info_gathering"),
                 "final_order_data": merged_data
             }
-        except Exception as e:
+        except Exception:
             return {"reply_text": "စနစ် အနည်းငယ် အလုပ်ရှုပ်နေလို့ပါ။", "intent": "info_gathering", "final_order_data": prev_data}
 
     def prompt(self, shop, menu, history):
@@ -51,23 +50,23 @@ You are "SellMate AI", a professional waiter for "{shop}".
 Tone: Polite Myanmar language ("ဗျာ/ခင်ဗျာ").
 
 [STRICT MENU RULE]
-- ONLY items from the [SHOP MENU] below are available.
-- If an item is NOT in the menu, tell the user politely.
-- Use product names in English as listed in [SHOP MENU].
+- ONLY items from the [SHOP MENU] below are available. 
+- DO NOT invent items. If not in menu, say it's unavailable.
+- Product names must be English as listed.
 
 [OBJECTIVE]
 Collect these details ONE BY ONE:
-1. Items & Quantity (Confirm items first)
+1. Items & Quantity (Confirm what they want first)
 2. Customer Name
 3. Phone Number
 4. Address
 5. Payment Method (Ask: "COD လား၊ ကြိုရှင်းမှာလားခင်ဗျာ?")
 
-[LOGIC RULES]
-- If User says "ဒါပဲ" or "ရပြီ", STOP asking for items and move to Step 2 (Name).
-- If Payment is "Pre-paid", mention that they need to send proof to Admin later.
-- Use [HISTORY] to avoid asking for information already provided.
-- Be concise and friendly. Avoid long explanations.
+[RULES]
+- If user says "ဒါပဲ" or "ရပြီ", move to next step (Name).
+- If payment is "Pre-paid", tell them to send proof to Admin after confirmation.
+- Use [HISTORY] to avoid asking for same info twice.
+- If user says "အကုန်ဖျက်" or "ပြန်မှာမယ်", clear everything.
 
 [HISTORY]
 {history}
@@ -84,7 +83,7 @@ Collect these details ONE BY ONE:
     "phone_no": "...", 
     "address": "...",
     "payment_method": "COD" or "Pre-paid",
-    "items": [{{ "name": "...", "qty": 1, "price": 0 }}]
+    "items": [{{ "name": "...", "qty": 1 }}]
  }}
 }}
 """
@@ -92,11 +91,8 @@ Collect these details ONE BY ONE:
     async def process(self, text, shop, menu, history="{}"):
         full_prompt = self.prompt(shop, menu, history)
         current_time = time.time()
-
-        # Gemini 429 Error ဖြစ်နေရင် Groq ကို တန်းသွားမယ်
         if not self.gemini_ok and (current_time - self.last_fail < self.cooldown_period):
             return await self.groq(full_prompt, text, history)
-
         try:
             client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
             res = await asyncio.to_thread(
@@ -107,7 +103,7 @@ Collect these details ONE BY ONE:
             )
             self.gemini_ok = True
             return self.safe_parse(res.text, history)
-        except Exception as e:
+        except Exception:
             self.gemini_ok = False
             self.last_fail = current_time
             return await self.groq(full_prompt, text, history)
@@ -119,16 +115,12 @@ Collect these details ONE BY ONE:
                 headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
                 json={
                     "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {"role": "system", "content": full_prompt},
-                        {"role": "user", "content": text}
-                    ],
+                    "messages": [{"role": "system", "content": full_prompt}, {"role": "user", "content": text}],
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"}
                 }
             )
-            data = res.json()
-            return self.safe_parse(data['choices'][0]['message']['content'], history)
+            return self.safe_parse(res.json()['choices'][0]['message']['content'], history)
         except Exception:
             return {"reply_text": "ခဏနေမှ ပြန်ပြောပေးပါဗျာ။", "intent": "info_gathering", "final_order_data": {}}
 
