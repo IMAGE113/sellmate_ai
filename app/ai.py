@@ -17,6 +17,7 @@ class AI:
             prev_data = {}
 
         try:
+            # Markdown code blocks တွေကို ဖယ်ရှားခြင်း
             text = re.sub(r"```json\s*|```", "", text).strip()
             start = text.find('{')
             end = text.rfind('}')
@@ -26,13 +27,13 @@ class AI:
             
             new_final_data = data.get("final_order_data", {})
             
-            # Data Merge: အချက်အလက်အသစ်နဲ့ အဟောင်းကို ပေါင်းစပ်ပေးမယ်
+            # 🔥 Multi-tenant Data Merge: အချက်အလက်တွေ တစ်ခုနဲ့တစ်ခု မပျောက်အောင် ပေါင်းပေးခြင်း
             merged_data = {
                 "customer_name": new_final_data.get("customer_name") or prev_data.get("customer_name", ""),
                 "phone_no": new_final_data.get("phone_no") or prev_data.get("phone_no", ""),
                 "address": new_final_data.get("address") or prev_data.get("address", ""),
                 "payment_method": new_final_data.get("payment_method") or prev_data.get("payment_method", ""),
-                "items": new_final_data.get("items") or prev_data.get("items", []),
+                "items": new_final_data.get("items") if new_final_data.get("items") else prev_data.get("items", []),
                 "total_price": new_final_data.get("total_price") or prev_data.get("total_price", 0)
             }
 
@@ -49,29 +50,34 @@ class AI:
 You are "SellMate AI", a professional waiter for "{shop}". 
 Tone: Polite Myanmar language ("ဗျာ/ခင်ဗျာ").
 
+[STRICT MENU RULE]
+- ONLY items from the [SHOP MENU] below are available.
+- If an item is NOT in the menu, tell the user politely.
+- Use product names in English as listed in [SHOP MENU].
+
 [OBJECTIVE]
 Collect these details ONE BY ONE:
-1. Items & Quantity (Confirm what they want first)
+1. Items & Quantity (Confirm items first)
 2. Customer Name
 3. Phone Number
 4. Address
-5. Payment Method (COD or Pre-paid)
+5. Payment Method (Ask: "COD လား၊ ကြိုရှင်းမှာလားခင်ဗျာ?")
 
-[STRICT RULES]
-- If User says "ဒါပဲ" or "ရပြီ", move to the next step (Name/Phone/Address).
-- If Payment is "Pre-paid", tell user to send payment proof to Admin after the summary.
-- ONLY ask for info that is missing in [HISTORY].
-- DO NOT translate product names from [MENU]. Use them as they are.
+[LOGIC RULES]
+- If User says "ဒါပဲ" or "ရပြီ", STOP asking for items and move to Step 2 (Name).
+- If Payment is "Pre-paid", mention that they need to send proof to Admin later.
+- Use [HISTORY] to avoid asking for information already provided.
+- Be concise and friendly. Avoid long explanations.
 
 [HISTORY]
 {history}
 
-[MENU]
+[SHOP MENU]
 {menu}
 
 [OUTPUT FORMAT - JSON ONLY]
 {{
- "reply_text": "မြန်မာလို ယဉ်ကျေးစွာ ပြန်စာ",
+ "reply_text": "မြန်မာလို ယဉ်ကျေးစွာ ပြန်စာ (လိုရင်းတိုရှင်း)",
  "intent": "info_gathering" or "confirm_order",
  "final_order_data": {{
     "customer_name": "...", 
@@ -87,6 +93,7 @@ Collect these details ONE BY ONE:
         full_prompt = self.prompt(shop, menu, history)
         current_time = time.time()
 
+        # Gemini 429 Error ဖြစ်နေရင် Groq ကို တန်းသွားမယ်
         if not self.gemini_ok and (current_time - self.last_fail < self.cooldown_period):
             return await self.groq(full_prompt, text, history)
 
@@ -112,7 +119,10 @@ Collect these details ONE BY ONE:
                 headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
                 json={
                     "model": "llama-3.3-70b-versatile",
-                    "messages": [{"role": "system", "content": full_prompt}, {"role": "user", "content": text}],
+                    "messages": [
+                        {"role": "system", "content": full_prompt},
+                        {"role": "user", "content": text}
+                    ],
                     "temperature": 0.1,
                     "response_format": {"type": "json_object"}
                 }
