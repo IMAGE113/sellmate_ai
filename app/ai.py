@@ -112,7 +112,7 @@ Return ONLY a valid JSON object. No extra text.
         try:
             res = await http_client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv('GRO['API_KEY')}"},
+                headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
                 json={
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
