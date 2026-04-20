@@ -12,7 +12,7 @@ class AI:
 
     def safe_parse(self, text, history_str):
         try:
-            prev_data = json.loads(history_str)
+            prev_data = json.loads(history_str) if history_str else {}
         except Exception:
             prev_data = {}
 
@@ -26,12 +26,12 @@ class AI:
             
             new_final_data = data.get("final_order_data", {})
             
-            # 🔥 Data Merge Logic: အရင်ရှိပြီးသား data တွေ မပျောက်အောင် ထိန်းပေးမယ်
+            # Data Merge: အချက်အလက်အသစ်နဲ့ အဟောင်းကို ပေါင်းစပ်ပေးမယ်
             merged_data = {
                 "customer_name": new_final_data.get("customer_name") or prev_data.get("customer_name", ""),
                 "phone_no": new_final_data.get("phone_no") or prev_data.get("phone_no", ""),
                 "address": new_final_data.get("address") or prev_data.get("address", ""),
-                "payment_method": new_final_data.get("payment_method") or prev_data.get("payment_method", "COD"),
+                "payment_method": new_final_data.get("payment_method") or prev_data.get("payment_method", ""),
                 "items": new_final_data.get("items") or prev_data.get("items", []),
                 "total_price": new_final_data.get("total_price") or prev_data.get("total_price", 0)
             }
@@ -46,42 +46,39 @@ class AI:
 
     def prompt(self, shop, menu, history):
         return f"""
-You are "SellMate AI", a professional virtual assistant for the shop "{shop}".
-Your task is to take orders from customers in a natural, polite Myanmar tone.
+You are "SellMate AI", a professional waiter for "{shop}". 
+Tone: Polite Myanmar language ("ဗျာ/ခင်ဗျာ").
 
-[STRICT RULES ON PRODUCT NAMES]
-- DO NOT translate product names into Myanmar script. Use English names from [SHOP MENU].
+[OBJECTIVE]
+Collect these details ONE BY ONE:
+1. Items & Quantity (Confirm what they want first)
+2. Customer Name
+3. Phone Number
+4. Address
+5. Payment Method (COD or Pre-paid)
 
-[DATA COLLECTION LOGIC]
-1. First, confirm the [items] the customer wants to buy.
-2. Once items are selected, check [HISTORY] and ask for missing info ONE BY ONE in this order:
-   - Ask for Name (if empty)
-   - Ask for Phone Number (if empty)
-   - Ask for Address (if empty)
-   - Ask for Payment Method (COD or KPay/Wave) (if empty)
-3. Do NOT ask for information that is already present in [HISTORY].
-
-[CONVERSATION STYLE]
-- Greeting: "မင်္ဂလာပါဗျာ! {shop} က ကြိုဆိုပါတယ်။ ဘာများ မှာယူသုံးဆောင်မလဲခင်ဗျာ?"
-- Politeness: Use "ဗျာ" or "ခင်ဗျာ" always. Avoid being robotic.
+[STRICT RULES]
+- If User says "ဒါပဲ" or "ရပြီ", move to the next step (Name/Phone/Address).
+- If Payment is "Pre-paid", tell user to send payment proof to Admin after the summary.
+- ONLY ask for info that is missing in [HISTORY].
+- DO NOT translate product names from [MENU]. Use them as they are.
 
 [HISTORY]
 {history}
 
-[SHOP MENU]
+[MENU]
 {menu}
 
 [OUTPUT FORMAT - JSON ONLY]
 {{
- "reply_text": "Your natural Myanmar reply here",
+ "reply_text": "မြန်မာလို ယဉ်ကျေးစွာ ပြန်စာ",
  "intent": "info_gathering" or "confirm_order",
  "final_order_data": {{
     "customer_name": "...", 
     "phone_no": "...", 
     "address": "...",
-    "payment_method": "COD" or "KPay/Wave",
-    "items": [{{ "name": "...", "qty": 1, "price": 0 }}],
-    "total_price": 0
+    "payment_method": "COD" or "Pre-paid",
+    "items": [{{ "name": "...", "qty": 1, "price": 0 }}]
  }}
 }}
 """
@@ -104,9 +101,8 @@ Your task is to take orders from customers in a natural, polite Myanmar tone.
             self.gemini_ok = True
             return self.safe_parse(res.text, history)
         except Exception as e:
-            if "429" in str(e):
-                self.gemini_ok = False
-                self.last_fail = current_time
+            self.gemini_ok = False
+            self.last_fail = current_time
             return await self.groq(full_prompt, text, history)
 
     async def groq(self, full_prompt, text, history):
