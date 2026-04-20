@@ -1,14 +1,21 @@
 import os, json, asyncio, time, httpx, re
 from google import genai
 from google.genai import types
+from openai import AsyncOpenAI
 
 http_client = httpx.AsyncClient(timeout=15.0)
 
 class AI:
     def __init__(self):
+        # OpenAI Client Initialize
+        self.openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        
+        # Status Tracking
+        self.openai_ok = True
         self.gemini_ok = True
-        self.last_fail = 0
-        self.cooldown_period = 300 
+        self.last_openai_fail = 0
+        self.last_gemini_fail = 0
+        self.cooldown = 300 # 5 မိနစ်နားမယ်
 
     def safe_parse(self, text, history_str):
         try:
@@ -17,13 +24,14 @@ class AI:
             prev_data = {}
 
         try:
+            # Markdown JSON block ဖယ်ရှားခြင်း
             text = re.sub(r"```json\s*|```", "", text).strip()
             start = text.find('{')
             end = text.rfind('}')
             if start != -1 and end != -1:
                 text = text[start:end+1]
-            data = json.loads(text)
             
+            data = json.loads(text)
             new_final_data = data.get("final_order_data", {})
             
             # Data Merge logic
@@ -33,7 +41,7 @@ class AI:
                 "address": new_final_data.get("address") or prev_data.get("address", ""),
                 "payment_method": new_final_data.get("payment_method") or prev_data.get("payment_method", ""),
                 "items": new_final_data.get("items") if new_final_data.get("items") else prev_data.get("items", []),
-                "total_price": 0 # total_price ကို worker ဘက်မှာပဲ တွက်မယ်
+                "total_price": 0 # Worker ဘက်မှာပဲ တွက်မယ်
             }
 
             return {
@@ -51,22 +59,11 @@ Tone: Polite Myanmar language ("ဗျာ/ခင်ဗျာ").
 
 [STRICT MENU RULE]
 - ONLY items from the [SHOP MENU] below are available. 
-- DO NOT invent items. If not in menu, say it's unavailable.
 - Product names must be English as listed.
 
 [OBJECTIVE]
-Collect these details ONE BY ONE:
-1. Items & Quantity (Confirm what they want first)
-2. Customer Name
-3. Phone Number
-4. Address
-5. Payment Method (Ask: "COD လား၊ ကြိုရှင်းမှာလားခင်ဗျာ?")
-
-[RULES]
-- If user says "ဒါပဲ" or "ရပြီ", move to next step (Name).
-- If payment is "Pre-paid", tell them to send proof to Admin after confirmation.
-- Use [HISTORY] to avoid asking for same info twice.
-- If user says "အကုန်ဖျက်" or "ပြန်မှာမယ်", clear everything.
+Collect: Items & Qty, Name, Phone, Address, Payment Method.
+Ask ONE detail at a time. Be concise.
 
 [HISTORY]
 {history}
@@ -76,7 +73,7 @@ Collect these details ONE BY ONE:
 
 [OUTPUT FORMAT - JSON ONLY]
 {{
- "reply_text": "မြန်မာလို ယဉ်ကျေးစွာ ပြန်စာ (လိုရင်းတိုရှင်း)",
+ "reply_text": "မြန်မာလို ပြန်စာ",
  "intent": "info_gathering" or "confirm_order",
  "final_order_data": {{
     "customer_name": "...", 
@@ -90,23 +87,43 @@ Collect these details ONE BY ONE:
 
     async def process(self, text, shop, menu, history="{}"):
         full_prompt = self.prompt(shop, menu, history)
-        current_time = time.time()
-        if not self.gemini_ok and (current_time - self.last_fail < self.cooldown_period):
-            return await self.groq(full_prompt, text, history)
-        try:
-            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            res = await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.0-flash",
-                contents=full_prompt + f"\nUser input: {text}",
-                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
-            )
-            self.gemini_ok = True
-            return self.safe_parse(res.text, history)
-        except Exception:
-            self.gemini_ok = False
-            self.last_fail = current_time
-            return await self.groq(full_prompt, text, history)
+        now = time.time()
+
+        # 1. Try OpenAI (Primary)
+        if self.openai_ok or (now - self.last_openai_fail > self.cooldown):
+            try:
+                response = await self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "system", "content": full_prompt}, {"role": "user", "content": text}],
+                    response_format={"type": "json_object"},
+                    temperature=0.1
+                )
+                self.openai_ok = True
+                return self.safe_parse(response.choices[0].message.content, history)
+            except Exception as e:
+                print(f"OpenAI Failed, switching to Gemini... {e}")
+                self.openai_ok = False
+                self.last_openai_fail = now
+
+        # 2. Try Gemini (Secondary Backup)
+        if self.gemini_ok or (now - self.last_gemini_fail > self.cooldown):
+            try:
+                client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+                res = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.0-flash",
+                    contents=full_prompt + f"\nUser input: {text}",
+                    config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
+                )
+                self.gemini_ok = True
+                return self.safe_parse(res.text, history)
+            except Exception as e:
+                print(f"Gemini Failed, switching to Groq... {e}")
+                self.gemini_ok = False
+                self.last_gemini_fail = now
+
+        # 3. Try Groq (Final Resort)
+        return await self.groq(full_prompt, text, history)
 
     async def groq(self, full_prompt, text, history):
         try:
