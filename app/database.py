@@ -21,7 +21,9 @@ async def get_db_pool(for_worker=False):
                 worker_pool = await asyncpg.create_pool(
                     DATABASE_URL, 
                     ssl='require',
-                    statement_cache_size=0
+                    statement_cache_size=0,
+                    min_size=1,
+                    max_size=10
                 )
             return worker_pool
         else:
@@ -29,7 +31,9 @@ async def get_db_pool(for_worker=False):
                 web_pool = await asyncpg.create_pool(
                     DATABASE_URL, 
                     ssl='require',
-                    statement_cache_size=0
+                    statement_cache_size=0,
+                    min_size=1,
+                    max_size=10
                 )
             return web_pool
     except Exception as e:
@@ -38,7 +42,8 @@ async def get_db_pool(for_worker=False):
 
 async def init_db(pool):
     """
-    Database Table များကို BIGINT chat_id စနစ်ဖြင့် တည်ဆောက်/ပြင်ဆင်ပေးပါတယ်။
+    Database Table များကို Safe ဖြစ်စွာ တည်ဆောက်/ပြင်ဆင်ပေးပါတယ်။
+    Data မပျက်စေရန် TRUNCATE/DROP များကို မသုံးထားပါ။
     """
     async with pool.acquire() as conn:
         # 1. Businesses Table
@@ -46,7 +51,7 @@ async def init_db(pool):
         CREATE TABLE IF NOT EXISTS businesses (
             id SERIAL PRIMARY KEY,
             shop_name TEXT,
-            name TEXT, -- shop_name နဲ့ name နှစ်ခုလုံးကို support လုပ်ဖို့
+            name TEXT, 
             tg_bot_token TEXT UNIQUE,
             created_at TIMESTAMP DEFAULT NOW()
         );
@@ -62,7 +67,7 @@ async def init_db(pool):
         );
         """)
 
-        # 3. Orders Table (chat_id ကို BIGINT ပြောင်းထားသည်)
+        # 3. Orders Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id SERIAL PRIMARY KEY,
@@ -80,7 +85,7 @@ async def init_db(pool):
         );
         """)
 
-        # 4. Pending Orders Table (chat_id ကို BIGINT ပြောင်းထားသည်)
+        # 4. Pending Orders Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS pending_orders (
             chat_id BIGINT,
@@ -91,7 +96,7 @@ async def init_db(pool):
         );
         """)
 
-        # 5. Task Queue Table (chat_id ကို BIGINT ပြောင်းထားသည်)
+        # 5. Task Queue Table
         await conn.execute("""
         CREATE TABLE IF NOT EXISTS task_queue (
             id SERIAL PRIMARY KEY,
@@ -107,14 +112,21 @@ async def init_db(pool):
         );
         """)
 
-        # --- Column များရှိပြီးသားဖြစ်နေလျှင် Type ပြောင်းရန် (Migration) ---
-        await conn.execute("""
-            ALTER TABLE task_queue ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT;
-            ALTER TABLE pending_orders ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT;
-            ALTER TABLE orders ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT;
-        """)
+        # --- Safe Migration: Column Type ပြောင်းလဲခြင်း (Data မပျက်စေပါ) ---
+        try:
+            await conn.execute("""
+                ALTER TABLE task_queue ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT;
+                ALTER TABLE pending_orders ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT;
+                ALTER TABLE orders ALTER COLUMN chat_id TYPE BIGINT USING chat_id::BIGINT;
+                
+                -- JSON ကို JSONB သို့ ပြောင်းရန်
+                ALTER TABLE pending_orders ALTER COLUMN order_data TYPE JSONB USING order_data::jsonb;
+                ALTER TABLE orders ALTER COLUMN items TYPE JSONB USING items::jsonb;
+            """)
+        except Exception as e:
+            logger.info(f"Migration note (Already up to date): {e}")
 
-        # --- Randy Cafe အတွက် Auto-Setup ---
+        # --- Shop Setup ---
         bot_token = os.getenv("TG_BOT_TOKEN")
         shop_name = os.getenv("SHOP_NAME", "Randy Cafe")
         if bot_token:
