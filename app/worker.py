@@ -23,35 +23,37 @@ async def send(token, chat_id, text):
 def validate(items, menu):
     valid = []
     total = 0
+    # Menu ကို dict အဖြစ်ပြောင်းလိုက်ရင် ပိုမြန်တယ်
+    menu_dict = {m['name'].lower(): m['price'] for m in menu}
+    
     for i in items:
-        for m in menu:
-            if m['name'].lower() == i.get('name','').lower():
-                qty = max(1, int(i.get('qty', 1)))
-                valid.append({
-                    "name": m['name'], 
-                    "qty": qty, 
-                    "price": m['price']
-                })
-                total += qty * m['price']
+        name = i.get('name', '').lower()
+        if name in menu_dict:
+            qty = max(1, int(i.get('qty', 1)))
+            price = menu_dict[name]
+            valid.append({
+                "name": i.get('name'), 
+                "qty": qty, 
+                "price": price
+            })
+            total += qty * price
     return valid, total
 
 async def run_worker():
-    # --- ပြင်ဆင်ချက်: Database Pool ကို Cache မပါဘဲ ယူမယ် ---
-    # get_db_pool ထဲမှာ statement_cache_size=0 ထည့်ထားဖို့ လိုပါတယ်
+    # statement_cache_size=0 ပါတဲ့ pool ကို ယူမယ်
     pool = await get_db_pool(for_worker=True)
     print("Worker is running and watching for tasks...")
 
     while True:
         try:
             async with pool.acquire() as conn:
-                # 1. Task Queue ထဲက အသစ်တစ်ခုကို ဆွဲထုတ်ပြီး processing ပြောင်းမယ်
-                # schema ပြောင်းထားတဲ့အတွက် created_at နဲ့ updated_at ကို သေချာစစ်မယ်
+                # 1. Task ဆွဲထုတ်မယ် (Attempts 5 ကြိမ်ထက်နည်းတာပဲ ယူမယ်)
                 task = await conn.fetchrow("""
                     UPDATE task_queue 
-                    SET status='processing', updated_at = NOW()
+                    SET status='processing', attempts = attempts + 1, updated_at = NOW()
                     WHERE id = (
                         SELECT id FROM task_queue 
-                        WHERE status='pending' 
+                        WHERE status IN ('pending', 'failed') AND attempts < 5
                         ORDER BY created_at ASC 
                         LIMIT 1 FOR UPDATE SKIP LOCKED
                     )
@@ -66,45 +68,46 @@ async def run_worker():
                 chat_id = task['chat_id']
                 text = task['user_text']
 
-                # 2. ဆိုင်ရဲ့ အချက်အလက်ကို ယူမယ်
+                # 2. ဆိုင်ရဲ့ Token နဲ့ အချက်အလက်ယူမယ်
                 biz = await conn.fetchrow("SELECT * FROM businesses WHERE id=$1", b_id)
                 if not biz:
-                    print(f"Business {b_id} not found.")
                     await conn.execute("UPDATE task_queue SET status='failed', last_error='Business not found' WHERE id=$1", task['id'])
                     continue
 
+                token = biz['tg_bot_token']
+
                 try:
                     # --- Logic A: Order Confirmation ---
-                    if text == "CONFIRM":
-                        async with conn.transaction():
-                            row = await conn.fetchrow("""
-                                DELETE FROM pending_orders 
-                                WHERE chat_id=$1 AND business_id=$2 
-                                RETURNING order_data
-                            """, chat_id, b_id)
+                    if text.upper() == "CONFIRM":
+                        row = await conn.fetchrow("""
+                            DELETE FROM pending_orders 
+                            WHERE chat_id=$1 AND business_id=$2 
+                            RETURNING order_data
+                        """, chat_id, b_id)
 
-                            if row:
-                                d = json.loads(row['order_data'])
-                                h = hashlib.md5(str(d).encode()).hexdigest()
+                        if row:
+                            d = json.loads(row['order_data'])
+                            h = hashlib.md5(f"{chat_id}:{row['order_data']}".encode()).hexdigest()
 
-                                await conn.execute("""
-                                    INSERT INTO orders (business_id, customer_name, phone_no, address, items, total_price, order_hash)
-                                    VALUES ($1, $2, $3, $4, $5, $6, $7)
-                                    ON CONFLICT (order_hash) DO NOTHING
-                                """, b_id, d.get('name', 'Customer'), d.get('phone'), d.get('address'), 
-                                     json.dumps(d.get('items')), d.get('total'), h)
+                            await conn.execute("""
+                                INSERT INTO orders (business_id, customer_name, phone_no, address, items, total_price, order_hash)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                ON CONFLICT (order_hash) DO NOTHING
+                            """, b_id, d.get('name', 'Customer'), d.get('phone'), d.get('address'), 
+                                 json.dumps(d.get('items')), d.get('total'), h)
 
-                                await send(biz['tg_bot_token'], chat_id, "✅ Order confirmed! ဆိုင်မှ မကြာမီ ဆက်သွယ်ပေးပါမည်။")
-                            else:
-                                await send(biz['tg_bot_token'], chat_id, "⚠️ အတည်ပြုရန် Order မရှိသေးပါ။")
+                            await send(token, chat_id, "✅ Order confirmed! အော်ဒါတင်ခြင်း အောင်မြင်ပါသည်။")
+                        else:
+                            await send(token, chat_id, "⚠️ အတည်ပြုရန် အော်ဒါမရှိသေးပါ။ အရင်ဆုံး စာရင်းပေးပေးပါ။")
 
                     # --- Logic B: AI Processing ---
                     else:
                         menu = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
+                        # AI ဆီပို့မယ်
                         res = await ai.process(text, biz['shop_name'], menu)
 
                         if res.get('intent') == "confirm_order":
-                            items, total = validate(res['final_order_data'].get('items', []), menu)
+                            items, total = validate(res.get('final_order_data', {}).get('items', []), menu)
                             
                             if items:
                                 res['final_order_data']['items'] = items
@@ -119,28 +122,23 @@ async def run_worker():
 
                                 summary = f"📝 **Order Summary**\n"
                                 for item in items:
-                                    summary += f"- {item['name']} x {item['qty']}\n"
-                                summary += f"\n💰 စုစုပေါင်း: {total} MMK\n\nအတည်ပြုရန် 'CONFIRM' ဟု ရိုက်ပေးပါ။"
-                                
-                                await send(biz['tg_bot_token'], chat_id, summary)
+                                    summary += f"- {item['name']} x {item['qty']} ({item['price']} ကျပ်)\n"
+                                summary += f"\n💰 စုစုပေါင်း: {total} MMK\n\nအတည်ပြုရန် 'CONFIRM' ဟု ပြန်ပို့ပေးပါ။"
+                                await send(token, chat_id, summary)
                             else:
-                                await send(biz['tg_bot_token'], chat_id, "❌ ဆိုင်မှာမရှိတဲ့ item တွေဖြစ်နေလို့ အော်ဒါတင်မရပါ။")
+                                await send(token, chat_id, "❌ စိတ်မရှိပါနဲ့၊ ဆိုင်ရဲ့ Menu ထဲက ပစ္စည်းတွေကိုပဲ မှာယူလို့ရပါတယ်။")
                         else:
-                            await send(biz['tg_bot_token'], chat_id, res['reply_text'])
+                            # ပုံမှန် စကားပြောဆိုမှုများ
+                            reply = res.get('reply_text', "နားမလည်လို့ပါခင်ဗျာ။ ပြန်ပြောပြပေးပါဦး။")
+                            await send(token, chat_id, reply)
 
-                    # Task ပြီးဆုံးကြောင်း မှတ်မယ်
+                    # အောင်မြင်ကြောင်းမှတ်မယ်
                     await conn.execute("UPDATE task_queue SET status='done', updated_at = NOW() WHERE id=$1", task['id'])
 
                 except Exception as inner_e:
-                    error_msg = str(inner_e)
-                    print(f"Inner Logic Error: {error_msg}")
-                    await conn.execute("UPDATE task_queue SET status='pending', last_error=$1, updated_at = NOW() WHERE id=$2", error_msg, task['id'])
-                    await asyncio.sleep(2)
+                    print(f"Inner Error: {inner_e}")
+                    await conn.execute("UPDATE task_queue SET status='failed', last_error=$1, updated_at = NOW() WHERE id=$2", str(inner_e), task['id'])
 
-        except asyncpg.InternalClientError:
-            # Schema ပြောင်းသွားချိန်မှာဖြစ်တဲ့ error အတွက် pool ကို refresh လုပ်ဖို့ ကြိုးစားမယ်
-            print("Database schema changed. Refreshing connection...")
-            await asyncio.sleep(2)
         except Exception as outer_e:
             print(f"Worker Loop Error: {outer_e}")
             await asyncio.sleep(5)
