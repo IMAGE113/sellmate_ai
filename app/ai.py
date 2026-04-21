@@ -1,6 +1,7 @@
 import os, json, asyncio, time, httpx, re
+from google import genai
+from google.genai import types
 
-# Global HTTP Client
 http_client = httpx.AsyncClient(timeout=15.0)
 
 class AI:
@@ -9,29 +10,10 @@ class AI:
         self.gemini_ok = True
         self.last_groq_fail = 0
         self.last_gemini_fail = 0
-        self.cooldown = 300 
+        self.cooldown = 120
 
-    # -----------------------------
-    # 🔒 HARD MENU VALIDATION
-    # -----------------------------
-    def validate_items(self, ai_items, menu):
-        valid = []
-        for ai_item in ai_items:
-            name = ai_item.get("name", "").lower()
-            match = next((m for m in menu if m["name"].lower() == name), None)
-            if match:
-                qty = max(1, int(ai_item.get("qty", 1)))
-                valid.append({
-                    "name": match["name"],
-                    "qty": qty,
-                    "price": match["price"]
-                })
-        return valid
-
-    # -----------------------------
-    # 🧠 SAFE PARSER (ANTI-HALLUCINATION)
-    # -----------------------------
-    def safe_parse(self, text, history_str, menu):
+    # ✅ SAFE PARSER (no crash + merge history)
+    def safe_parse(self, text, history_str):
         try:
             prev_data = json.loads(history_str) if history_str else {}
         except:
@@ -47,31 +29,18 @@ class AI:
             data = json.loads(text)
             new_data = data.get("final_order_data", {})
 
-            raw_items = new_data.get("items", [])
-            if not isinstance(raw_items, list):
-                raw_items = []
-
-            # ✅ VALIDATE AGAINST MENU
-            valid_items = self.validate_items(raw_items, menu)
-
-            total = sum(i["qty"] * i["price"] for i in valid_items)
+            items = new_data.get("items", [])
+            if not isinstance(items, list):
+                items = []
 
             merged = {
-                "customer_name": str(new_data.get("customer_name") or prev_data.get("customer_name", ""))[:100],
-                "phone_no": str(new_data.get("phone_no") or prev_data.get("phone_no", ""))[:20],
-                "address": str(new_data.get("address") or prev_data.get("address", ""))[:255],
+                "customer_name": new_data.get("customer_name") or prev_data.get("customer_name"),
+                "phone_no": new_data.get("phone_no") or prev_data.get("phone_no"),
+                "address": new_data.get("address") or prev_data.get("address"),
                 "payment_method": new_data.get("payment_method") or prev_data.get("payment_method", "COD"),
-                "items": valid_items,
-                "total_price": total
+                "items": items,
+                "total_price": 0
             }
-
-            # ❌ if AI tried invalid menu → reject
-            if raw_items and not valid_items:
-                return {
-                    "reply_text": "တောင်းပန်ပါတယ်ခင်ဗျာ၊ ဒီပစ္စည်း Menu ထဲမှာမရှိပါဘူး။ Menu ထဲကသာ ရွေးချယ်ပေးပါ။",
-                    "intent": "info_gathering",
-                    "final_order_data": prev_data
-                }
 
             return {
                 "reply_text": data.get("reply_text", "ဘာများ မှာယူချင်ပါသလဲခင်ဗျာ?"),
@@ -79,64 +48,58 @@ class AI:
                 "final_order_data": merged
             }
 
-        except Exception:
+        except:
             return {
-                "reply_text": "စနစ် အနည်းငယ် ပြဿနာရှိနေပါတယ်ခင်ဗျာ။ ထပ်မံပြောပေးပါ။",
+                "reply_text": "စနစ် အနည်းငယ် အလုပ်ရှုပ်နေပါတယ်။ ထပ်ပြောပေးပါခင်ဗျာ။",
                 "intent": "info_gathering",
                 "final_order_data": prev_data
             }
 
-    # -----------------------------
-    # 🧠 STRONG PROMPT
-    # -----------------------------
+    # ✅ SMART PROMPT (no loop + no hallucination)
     def prompt(self, shop, menu, history):
+        menu_str = "\n".join([f"- {m['name']} ({m['price']} MMK)" for m in menu])
+
         return f"""
 You are a professional waiter for "{shop}".
 
-STRICT RULES:
-- Only use items EXACTLY from menu
-- If item not in menu → REJECT
-- DO NOT guess
-- DO NOT create items
-- NEVER repeat same question
+RULES:
+- Speak natural Myanmar (polite).
+- ONLY use items from menu.
+- NEVER create new items.
+- If item not in menu → ask again.
 
 FLOW:
-1. Ask item
-2. Ask quantity
-3. Ask name
-4. Ask phone
-5. Ask address
-6. Ask payment
-7. Confirm order
+- Collect missing info step by step.
+- DO NOT ask again if already provided.
+
+DATA TO COLLECT:
+name, phone, address, payment_method, items
 
 Menu:
-{menu}
+{menu_str}
 
-History:
+Conversation History:
 {history}
 
-Return JSON ONLY:
+OUTPUT JSON:
 {{
- "reply_text": "...",
- "intent": "info_gathering" or "confirm_order",
+ "reply_text": "short natural reply",
+ "intent": "info_gathering" OR "confirm_order",
  "final_order_data": {{
     "customer_name": "...",
     "phone_no": "...",
     "address": "...",
-    "payment_method": "...",
+    "payment_method": "COD or Prepaid",
     "items": [{{"name": "...", "qty": 1}}]
  }}
 }}
 """
 
-    # -----------------------------
-    # 🚀 MAIN PROCESS
-    # -----------------------------
     async def process(self, text, shop, menu, history="{}"):
         full_prompt = self.prompt(shop, menu, history)
         now = time.time()
 
-        # -------- GROQ --------
+        # ✅ GROQ FIRST
         if self.groq_ok or (now - self.last_groq_fail > self.cooldown):
             try:
                 res = await http_client.post(
@@ -145,42 +108,49 @@ Return JSON ONLY:
                     json={
                         "model": "llama-3.3-70b-versatile",
                         "messages": [
-                            {"role": "system", "content": "JSON only"},
+                            {"role": "system", "content": "You respond only in JSON."},
                             {"role": "user", "content": full_prompt + f"\nUser: {text}"}
                         ],
-                        "temperature": 0.1,
+                        "temperature": 0.2,
                         "response_format": {"type": "json_object"}
                     }
                 )
                 if res.status_code == 200:
                     self.groq_ok = True
-                    return self.safe_parse(res.json()['choices'][0]['message']['content'], history, menu)
+                    return self.safe_parse(res.json()['choices'][0]['message']['content'], history)
                 else:
-                    raise Exception()
-            except:
+                    raise Exception("Groq failed")
+
+            except Exception as e:
+                print("Groq Error:", e)
                 self.groq_ok = False
                 self.last_groq_fail = now
 
-        # -------- GEMINI --------
-        try:
-            from google import genai
-            from google.genai import types
+        # ✅ GEMINI BACKUP
+        if self.gemini_ok or (now - self.last_gemini_fail > self.cooldown):
+            try:
+                client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+                res = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model="gemini-2.0-flash",
+                    contents=full_prompt + f"\nUser: {text}",
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.2
+                    )
+                )
+                self.gemini_ok = True
+                return self.safe_parse(res.text, history)
 
-            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            res = await asyncio.to_thread(
-                client.models.generate_content,
-                model="gemini-2.0-flash",
-                contents=full_prompt + f"\nUser: {text}",
-                config=types.GenerateContentConfig(response_mime_type="application/json", temperature=0.1)
-            )
-            self.gemini_ok = True
-            return self.safe_parse(res.text, history, menu)
+            except Exception as e:
+                print("Gemini Error:", e)
+                self.gemini_ok = False
+                self.last_gemini_fail = now
 
-        except:
-            return {
-                "reply_text": "ခဏနေမှ ပြန်ကြိုးစားပါခင်ဗျာ။",
-                "intent": "info_gathering",
-                "final_order_data": {}
-            }
+        return {
+            "reply_text": "ခဏနေမှ ပြန်ပြောပေးပါခင်ဗျာ။",
+            "intent": "info_gathering",
+            "final_order_data": {}
+        }
 
 ai = AI()
