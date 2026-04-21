@@ -27,90 +27,93 @@ def validate(items, menu):
     return valid, total
 
 async def run_worker():
+    # 🔥 FIXED: get_db_pool() ထဲက keyword argument ကို ဖြုတ်လိုက်ပါပြီ
     pool = await get_db_pool()
     print("🔥 Worker running...")
 
     while True:
-        async with pool.acquire() as conn:
+        try:
+            async with pool.acquire() as conn:
+                task = await conn.fetchrow("""
+                UPDATE task_queue SET status='processing'
+                WHERE id = (
+                    SELECT id FROM task_queue
+                    WHERE status='pending'
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING *
+                """)
 
-            task = await conn.fetchrow("""
-            UPDATE task_queue SET status='processing'
-            WHERE id = (
-                SELECT id FROM task_queue
-                WHERE status='pending'
-                LIMIT 1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING *
-            """)
+                if not task:
+                    await asyncio.sleep(1)
+                    continue
 
-            if not task:
-                await asyncio.sleep(1)
-                continue
+                b_id = task['business_id']
+                chat_id = task['chat_id']
+                text = task['user_text']
 
-            b_id = task['business_id']
-            chat_id = task['chat_id']
-            text = task['user_text']
+                biz = await conn.fetchrow("SELECT * FROM businesses WHERE id=$1", b_id)
+                token = biz['tg_bot_token']
+                shop = biz['shop_name']
 
-            biz = await conn.fetchrow("SELECT * FROM businesses WHERE id=$1", b_id)
+                # CONFIRM LOGIC
+                if text.lower() in ["confirm", "ok", "အတည်ပြု"]:
+                    row = await conn.fetchrow("""
+                    DELETE FROM pending_orders 
+                    WHERE chat_id=$1 AND business_id=$2 
+                    RETURNING order_data
+                    """, chat_id, b_id)
 
-            token = biz['tg_bot_token']
-            shop = biz['shop_name']
+                    if row:
+                        d = json.loads(row['order_data'])
+                        h = hashlib.md5(str(d).encode()).hexdigest()
 
-            # CONFIRM
-            if text.lower() in ["confirm", "ok", "အတည်ပြု"]:
-                row = await conn.fetchrow("""
-                DELETE FROM pending_orders 
-                WHERE chat_id=$1 AND business_id=$2 
-                RETURNING order_data
-                """, chat_id, b_id)
+                        await conn.execute("""
+                        INSERT INTO orders 
+                        (business_id, chat_id, customer_name, phone_no, address, items, total_price, payment_method, order_hash)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        b_id, chat_id,
+                        d['customer_name'], d['phone_no'], d['address'],
+                        json.dumps(d['items']), d['total_price'],
+                        d['payment_method'], h)
 
-                if row:
-                    d = json.loads(row['order_data'])
-                    h = hashlib.md5(str(d).encode()).hexdigest()
+                        await send(token, chat_id, "✅ Order Confirmed")
+                    else:
+                        await send(token, chat_id, "⚠️ No pending order")
+
+                else:
+                    menu_rows = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
+                    menu = [{"name": m["name"], "price": m["price"]} for m in menu_rows]
+
+                    pending = await conn.fetchrow("""
+                    SELECT order_data FROM pending_orders 
+                    WHERE chat_id=$1 AND business_id=$2
+                    """, chat_id, b_id)
+
+                    res = await ai.process(text, shop, menu, pending['order_data'] if pending else "{}")
+
+                    valid_items, total = validate(res['final_order_data'].get('items', []), menu)
+                    res['final_order_data']['items'] = valid_items
+                    res['final_order_data']['total_price'] = total
 
                     await conn.execute("""
-                    INSERT INTO orders 
-                    (business_id, chat_id, customer_name, phone_no, address, items, total_price, payment_method, order_hash)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                    ON CONFLICT DO NOTHING
-                    """,
-                    b_id, chat_id,
-                    d['customer_name'], d['phone_no'], d['address'],
-                    json.dumps(d['items']), d['total_price'],
-                    d['payment_method'], h)
+                    INSERT INTO pending_orders (chat_id, business_id, order_data)
+                    VALUES ($1,$2,$3)
+                    ON CONFLICT (chat_id,business_id)
+                    DO UPDATE SET order_data=$3
+                    """, chat_id, b_id, json.dumps(res['final_order_data']))
 
-                    await send(token, chat_id, "✅ Order Confirmed")
-                else:
-                    await send(token, chat_id, "⚠️ No pending order")
+                    if res['intent'] == "confirm_order" and valid_items:
+                        summary = f"🧾 Order Summary\nTotal: {total}\nType CONFIRM"
+                        await send(token, chat_id, summary)
+                    else:
+                        await send(token, chat_id, res['reply_text'])
 
-            else:
-                menu_rows = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
-                menu = [{"name": m["name"], "price": m["price"]} for m in menu_rows]
-
-                pending = await conn.fetchrow("""
-                SELECT order_data FROM pending_orders 
-                WHERE chat_id=$1 AND business_id=$2
-                """, chat_id, b_id)
-
-                res = await ai.process(text, shop, menu, pending['order_data'] if pending else "{}")
-
-                valid_items, total = validate(res['final_order_data'].get('items', []), menu)
-
-                res['final_order_data']['items'] = valid_items
-                res['final_order_data']['total_price'] = total
-
-                await conn.execute("""
-                INSERT INTO pending_orders (chat_id, business_id, order_data)
-                VALUES ($1,$2,$3)
-                ON CONFLICT (chat_id,business_id)
-                DO UPDATE SET order_data=$3
-                """, chat_id, b_id, json.dumps(res['final_order_data']))
-
-                if res['intent'] == "confirm_order" and valid_items:
-                    summary = f"🧾 Order Summary\nTotal: {total}\nType CONFIRM"
-                    await send(token, chat_id, summary)
-                else:
-                    await send(token, chat_id, res['reply_text'])
-
-            await conn.execute("UPDATE task_queue SET status='done' WHERE id=$1", task['id'])
+                await conn.execute("UPDATE task_queue SET status='done' WHERE id=$1", task['id'])
+        
+        except Exception as e:
+            print(f"❌ Worker Error: {e}")
+            await asyncio.sleep(2)
