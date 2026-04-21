@@ -1,76 +1,111 @@
-import hashlib
-import os
-import asyncio
-from fastapi import FastAPI, Request
-from .database import get_db_pool, init_db
-from .worker import run_worker
+import asyncio, json, hashlib, httpx
+from .database import get_db_pool
+from .ai import ai
 
-app = FastAPI()
+http_client = httpx.AsyncClient(timeout=15.0)
 
-# ၁။ Startup မှာ Database Initialization လုပ်ပြီး Worker ကို Run မယ်
-@app.on_event("startup")
-async def startup_event():
-    pool = await get_db_pool()
-    await init_db(pool)
-    
-    # Worker ကို Background Task အနေနဲ့ Run ထားခြင်း
-    asyncio.create_task(run_worker())
-    print("🚀 SellMate AI Server & Worker started successfully!")
-
-# ၂။ Render Health Check (405 Method Not Allowed မဖြစ်အောင်)
-@app.get("/")
-async def root():
-    return {
-        "status": "online",
-        "message": "SellMate AI is running",
-        "db_mode": "multi-tenant"
-    }
-
-# ၃။ Telegram Webhook Endpoint
-@app.post("/webhook/{token}")
-async def webhook(token: str, request: Request):
-    data = await request.json()
-    pool = await get_db_pool()
-
-    async with pool.acquire() as conn:
-        # ဆိုင်ရှိမရှိ စစ်ဆေးခြင်း
-        biz = await conn.fetchrow(
-            "SELECT id FROM businesses WHERE tg_bot_token=$1", token
+async def send(token, chat_id, text):
+    try:
+        await http_client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": int(chat_id), "text": text, "parse_mode": "HTML"}
         )
+    except Exception as e:
+        print(f"❌ Telegram Send Error: {e}")
 
-        if not biz:
-            return {"ok": False, "error": "Business not found"}
+def validate(items, menu):
+    valid = []
+    total = 0
+    menu_dict = {m['name'].lower(): m['price'] for m in menu}
+    for i in items:
+        name = i.get('name', '').lower()
+        if name in menu_dict:
+            qty = max(1, int(i.get('qty', 1)))
+            price = menu_dict[name]
+            valid.append({"name": name, "qty": qty, "price": price})
+            total += qty * price
+    return valid, total
 
-        b_id = biz['id']
+async def run_worker():
+    pool = await get_db_pool()
+    print("🔥 Worker running and listening for tasks...")
 
-        # Message ပါမှသာ Task Queue ထဲထည့်ခြင်း
-        if "message" not in data or "text" not in data["message"]:
-            return {"ok": True}
-
-        # Telegram ကလာတဲ့ Chat ID ကို ယူတယ်
-        raw_chat_id = data["message"]["chat"]["id"]
-        text = data["message"]["text"]
-        
-        # 🔥 CRITICAL FIX: chat_id ကို String အဖြစ် ပြောင်းပေးခြင်း (Database TEXT type အတွက်)
-        chat_id_str = str(raw_chat_id)
-
-        # Duplicate Request တွေကို ကာကွယ်ဖို့ Hash လုပ်ခြင်း
-        h = hashlib.md5(f"{b_id}:{chat_id_str}:{text}".encode()).hexdigest()
-
-        # Task Queue ထဲသို့ ထည့်သွင်းခြင်း
+    while True:
         try:
-            await conn.execute("""
-                INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (request_hash) DO NOTHING
-            """, b_id, chat_id_str, text, h)
-        except Exception as e:
-            print(f"❌ DB Insert Error: {e}")
-            # အကယ်၍ database က integer ပဲ လက်ခံသေးရင် int() ပြန်ပြောင်းစမ်းမယ်
-            await conn.execute("""
-                INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (request_hash) DO NOTHING
-            """, b_id, int(raw_chat_id), text, h)
+            async with pool.acquire() as conn:
+                # 🔥 FIXED: chat_id ကို explicit text ပြောင်းပြီး ဆွဲထုတ်မယ်
+                task = await conn.fetchrow("""
+                UPDATE task_queue SET status='processing'
+                WHERE id = (
+                    SELECT id FROM task_queue
+                    WHERE status='pending'
+                    ORDER BY id ASC
+                    LIMIT 1
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, business_id, chat_id::TEXT, user_text
+                """)
 
-    return {"ok": True}
+                if not task:
+                    await asyncio.sleep(1.5)
+                    continue
+
+                print(f"📩 Processing task for Chat ID: {task['chat_id']}")
+                
+                b_id = task['business_id']
+                chat_id = task['chat_id']
+                text = task['user_text']
+
+                biz = await conn.fetchrow("SELECT * FROM businesses WHERE id=$1", b_id)
+                token = biz['tg_bot_token']
+                shop = biz['shop_name']
+
+                if text.lower() in ["confirm", "ok", "အတည်ပြု"]:
+                    row = await conn.fetchrow("""
+                    DELETE FROM pending_orders 
+                    WHERE chat_id=$1 AND business_id=$2 
+                    RETURNING order_data
+                    """, chat_id, b_id)
+
+                    if row:
+                        d = json.loads(row['order_data'])
+                        h = hashlib.md5(str(d).encode()).hexdigest()
+                        await conn.execute("""
+                        INSERT INTO orders 
+                        (business_id, chat_id, customer_name, phone_no, address, items, total_price, payment_method, order_hash)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                        ON CONFLICT DO NOTHING
+                        """, b_id, chat_id, d['customer_name'], d['phone_no'], d['address'], 
+                        json.dumps(d['items']), d['total_price'], d['payment_method'], h)
+                        await send(token, chat_id, "✅ Order Confirmed")
+                    else:
+                        await send(token, chat_id, "⚠️ No pending order")
+                else:
+                    menu_rows = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
+                    menu = [{"name": m["name"], "price": m["price"]} for m in menu_rows]
+                    pending = await conn.fetchrow("SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2", chat_id, b_id)
+                    
+                    res = await ai.process(text, shop, menu, pending['order_data'] if pending else "{}")
+                    valid_items, total = validate(res['final_order_data'].get('items', []), menu)
+                    res['final_order_data']['items'] = valid_items
+                    res['final_order_data']['total_price'] = total
+
+                    await conn.execute("""
+                    INSERT INTO pending_orders (chat_id, business_id, order_data)
+                    VALUES ($1,$2,$3)
+                    ON CONFLICT (chat_id,business_id)
+                    DO UPDATE SET order_data=$3
+                    """, chat_id, b_id, json.dumps(res['final_order_data']))
+
+                    if res['intent'] == "confirm_order" and valid_items:
+                        summary = f"🧾 Order Summary\nTotal: {total}\nType CONFIRM"
+                        await send(token, chat_id, summary)
+                    else:
+                        await send(token, chat_id, res['reply_text'])
+
+                await conn.execute("UPDATE task_queue SET status='done' WHERE id=$1", task['id'])
+                print(f"✅ Task {task['id']} completed.")
+
+        except Exception as e:
+            print(f"❌ Worker Error: {e}")
+            await asyncio.sleep(2)
