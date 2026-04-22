@@ -11,14 +11,9 @@ class AI:
             text = re.sub(r"```json|```", "", text).strip()
             data = json.loads(text)
         except Exception:
-            if current_order.get("items"):
-                return {
-                    "reply_text": "အော်ဒါဆက်လုပ်ချင်ပါသေးလားခင်ဗျာ? ဆက်ပြောနိုင်ပါတယ်။",
-                    "intent": "info_gathering",
-                    "final_order_data": current_order
-                }
+            # Error တက်ရင် လိုအပ်တဲ့ အချက်အလက်ကို တစ်ကြောင်းတည်း တိုတိုပဲ ပြန်မေးမယ်
             return {
-                "reply_text": "ဘာများ မှာယူမလဲခင်ဗျာ?",
+                "reply_text": "အော်ဒါတင်ပေးဖို့အတွက် အမည်၊ ဖုန်းနံပါတ်၊ လိပ်စာ အပြည့်အစုံလေး ရေးပေးပါခင်ဗျာ။",
                 "intent": "info_gathering",
                 "final_order_data": current_order
             }
@@ -41,13 +36,6 @@ class AI:
 
         cleaned_items = [{"name": k, "qty": v} for k, v in merged_items.items()]
 
-        if ai_data.get("items") and not cleaned_items:
-            return {
-                "reply_text": "မီနူးထဲမှာ မရှိတဲ့ပစ္စည်း ဖြစ်နေပါတယ်ခင်ဗျာ။ တစ်ချက်ပြန်စစ်ပေးပါ။",
-                "intent": "info_gathering",
-                "final_order_data": current_order
-            }
-
         # Payment Logic Refinement
         payment = (ai_data.get("payment_method") or current_order.get("payment_method", "COD")).lower()
         if "pre" in payment or "kpay" in payment or "wave" in payment:
@@ -63,7 +51,7 @@ class AI:
             "items": cleaned_items
         }
 
-        reply = str(data.get("reply_text") or "ဘာများ မှာယူမလဲခင်ဗျာ?").strip()
+        reply = str(data.get("reply_text") or "ဆက်လက်မှာယူနိုင်ပါတယ်ခင်ဗျာ။").strip()
         
         return {
             "reply_text": reply,
@@ -72,36 +60,34 @@ class AI:
         }
 
     # ==========================================
-    # 🎯 IMPROVED PROMPT (STRICT ORDER FLOW)
+    # 🎯 IMPROVED PROMPT (DIRECT & CLEAN SUMMARY)
     # ==========================================
     def prompt(self, shop, menu, current_order):
         return f"""
 You are a PROFESSIONAL AI WAITER for {shop}. 
-Your ONLY goal is to extract order details. DO NOT use old data from outside this conversation.
+Task: Extract order details (Items, Name, Phone, Address).
 
 ━━━━━━━━━━━━━━━━━━━━━━
-🚨 ORDER FLOW PRIORITY
+🚨 CRITICAL RULES (STRICT)
 ━━━━━━━━━━━━━━━━━━━━━━
-1. FIRST STEP: Always prioritize adding ITEMS.
-2. DO NOT ask for personal info until at least ONE item is added.
-3. ONCE ITEMS EXIST: Ask for Name -> Phone -> Address -> Payment Method (COD/Prepaid).
-4. If a field in CURRENT STATE is already filled, DO NOT ask for it again.
+1. BE DIRECT: No extra greetings or repeating customer names (e.g., No "Mingalabar Htet Aung").
+2. TOKEN SAVING: If info is missing, ask for Name, Phone, and Address together in ONE short sentence.
+3. LOGIC: ONLY ask for personal info after at least ONE item is added to the cart.
+4. ORDER SUMMARY: Show the summary ONLY when all info is collected.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-📋 ORDER SUMMARY LAYOUT (STRICT)
+📋 ORDER SUMMARY LAYOUT
 ━━━━━━━━━━━━━━━━━━━━━━
-Show the summary ONLY when all info is collected, using this format:
----
 📝 **အော်ဒါအနှစ်ချုပ်**
-------------------
+━━━━━━━━━━━━━━
 🛒 **မှာယူသည့်ပစ္စည်းများ:**
 • [Item Name] x [Qty]
-------------------
+
 👤 **အမည်:** [Name]
 📞 **ဖုန်း:** [Phone]
 📍 **လိပ်စာ:** [Address]
 💳 **ငွေပေးချေမှု:** [COD or Prepaid]
-------------------
+━━━━━━━━━━━━━━
 မှန်ကန်ပါက **Confirm** ဟု ရိုက်ပေးပါ။
 
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -112,15 +98,9 @@ CURRENT STATE: {json.dumps(current_order, ensure_ascii=False)}
 
 OUTPUT JSON ONLY:
 {{
-  "reply_text": "...",
+  "reply_text": "Short Burmese sentence",
   "intent": "info_gathering OR confirm_order",
-  "final_order_data": {{ 
-    "customer_name": "...", 
-    "phone_no": "...", 
-    "address": "...", 
-    "payment_method": "...", 
-    "items": [] 
-  }}
+  "final_order_data": {{ ... }}
 }}
 """
 
@@ -129,7 +109,7 @@ OUTPUT JSON ONLY:
         if text.strip() == "/start":
             blank_order = {"customer_name": "", "phone_no": "", "address": "", "payment_method": "COD", "items": []}
             return {
-                "reply_text": f"မင်္ဂလာပါခင်ဗျာ! {shop} မှ ကြိုဆိုပါတယ်။ 🙏\nဒီနေ့ ဘာများ မှာယူမလဲခင်ဗျာ? မှာယူလိုတဲ့ ပစ္စည်းအမည်လေး ပြောပေးပါ။",
+                "reply_text": f"မင်္ဂလာပါ! {shop} မှ ကြိုဆိုပါတယ်။ 🙏\nဒီနေ့ ဘာများ မှာယူမလဲခင်ဗျာ?",
                 "intent": "info_gathering",
                 "final_order_data": blank_order
             }
@@ -144,8 +124,8 @@ OUTPUT JSON ONLY:
                 json={
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
-                        {"role": "system", "content": "Output STRICT JSON only."},
-                        {"role": "user", "content": f"{prompt_text}\n\nUSER INPUT: {text}"}
+                        {"role": "system", "content": "Return JSON. No conversational filler."},
+                        {"role": "user", "content": f"{prompt_text}\n\nUSER: {text}"}
                     ],
                     "temperature": 0,
                     "response_format": {"type": "json_object"}
@@ -168,6 +148,6 @@ OUTPUT JSON ONLY:
 
         except Exception as e:
             print("🔥 AI ERROR:", str(e))
-            return {"reply_text": f"{shop} မှာ ဘာများ မှာယူမလဲခင်ဗျာ?", "intent": "info_gathering", "final_order_data": current_order}
+            return {"reply_text": "နားမလည်လိုက်လို့ တစ်ချက်ပြန်ပြောပေးပါဦးခင်ဗျာ။", "intent": "info_gathering", "final_order_data": current_order}
 
 ai = AI()
