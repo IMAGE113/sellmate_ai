@@ -1,20 +1,20 @@
 import hashlib
 import os
 import asyncio
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request
 from .database import get_db_pool, init_db
 from .worker import run_worker
 
 app = FastAPI()
 
-# Global variable အနေနဲ့ pool ကို သိမ်းထားမယ် (ခဏခဏ get_db_pool ခေါ်စရာမလိုအောင်)
+# Global variable အနေနဲ့ pool ကို သိမ်းထားမယ်
 db_pool = None
 
 @app.on_event("startup")
 async def startup_event():
     global db_pool
     db_pool = await get_db_pool() # Pool ကို တစ်ခါပဲ ဆောက်တယ်
-    await init_db(db_pool)
+    await init_db(db_pool) # Database Tables တွေကို startup မှာ initialize လုပ်မယ်
     
     # Worker ကို background task အနေနဲ့ run တယ်
     asyncio.create_task(run_worker())
@@ -31,7 +31,6 @@ async def root():
 @app.post("/webhook/{token}")
 async def webhook(token: str, request: Request):
     global db_pool
-    # Pool မရှိသေးရင် (သို့) ချိတ်ဆက်မှုပြတ်နေရင် ပြန်ယူမယ်
     if not db_pool:
         db_pool = await get_db_pool()
 
@@ -53,28 +52,26 @@ async def webhook(token: str, request: Request):
         if not message or "text" not in message:
             return {"ok": True}
 
-        chat_id = message["chat"]["id"]
+        raw_chat_id = message["chat"]["id"]
         text = message["text"]
         
         # 3. Request Hash (Duplicate ပို့တာ ကာကွယ်ဖို့)
-        # CTO Tip: Timestamp ထည့်လိုက်ရင် ဝယ်သူက "Hi" နှစ်ခါရိုက်ရင် နှစ်ခါလုံး အလုပ်လုပ်မယ်
-        h = hashlib.md5(f"{b_id}:{chat_id}:{text}".encode()).hexdigest()
+        h = hashlib.md5(f"{b_id}:{raw_chat_id}:{text}".encode()).hexdigest()
 
-        # 4. Task Queue ထဲသို့ ထည့်သွင်းခြင်း
+        # 4. Task Queue ထဲသို့ ထည့်သွင်းခြင်း (Type mismatch fix)
         try:
-            # chat_id ကို string အဖြစ်သိမ်းတာ ပိုစိတ်ချရတယ် (DB TEXT format ဖြစ်ရင်)
+            # မင်းရဲ့ Database က Integer ဖြစ်ဖို့များတဲ့အတွက် chat_id ကို int ပြောင်းပြီး အရင်ကြိုးစားမယ်
             await conn.execute("""
                 INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (request_hash) DO NOTHING
-            """, b_id, str(chat_id), text, h)
-        except Exception as e:
-            print(f"❌ Webhook DB Error: {e}")
-            # Fallback for Integer chat_id
+            """, b_id, int(raw_chat_id), text, h)
+        except Exception:
+            # အကယ်၍ error တက်ခဲ့ရင် chat_id ကို string အဖြစ် ပြောင်းပြီး fallback လုပ်မယ်
             await conn.execute("""
                 INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (request_hash) DO NOTHING
-            """, b_id, int(chat_id), text, h)
+            """, b_id, str(raw_chat_id), text, h)
 
     return {"ok": True}
