@@ -1,137 +1,149 @@
-import asyncio
-import json
-import httpx
-import logging
+import asyncio, json, hashlib, httpx
+from datetime import datetime
 from .database import get_db_pool
 from .ai import ai
 
-# Logging setup - Render Log မှာ အသေးစိတ်မြင်ရအောင် လုပ်ထားပါတယ်။
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+http_client = httpx.AsyncClient(timeout=15.0)
 
-http_client = httpx.AsyncClient(timeout=30.0)
+async def send(token, chat_id, text):
+    if not text:
+        text = "ဘာများ မှာယူမလဲခင်ဗျာ?"
 
-async def send_telegram(token, chat_id, text):
-    """Telegram API ဆီ စာသားလှမ်းပို့တဲ့ Function"""
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            "chat_id": str(chat_id), 
-            "text": text, 
-            "parse_mode": "HTML"
-        }
-        
-        logger.info(f"📡 Sending to TG: {chat_id}")
-        resp = await http_client.post(url, json=payload)
-        result = resp.json()
-        
-        if not result.get("ok"):
-            logger.error(f"❌ TG API Error: {result.get('description')}")
-        else:
-            logger.info(f"✅ TG Message Sent Successfully")
-        return result
+        await http_client.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": int(chat_id), "text": text}
+        )
+        await asyncio.sleep(0.05)
     except Exception as e:
-        logger.error(f"❌ Telegram Network Error: {e}")
+        print("TG error:", e)
 
-def validate_items(items, menu):
-    """AI ဆီကရလာတဲ့ items တွေကို လက်ရှိ Menu နဲ့ တိုက်စစ်ပြီး ဈေးနှုန်းတွက်ချက်ခြင်း"""
-    valid = []
-    total = 0
-    menu_dict = {m['name'].lower(): m['price'] for m in menu}
-    
-    if not items:
-        return valid, total
 
-    for i in items:
-        name = str(i.get('name', '')).lower()
+def validate(items, menu):
+    valid, total = [], 0
+    menu_dict = {m["name"].lower(): m["price"] for m in menu}
+
+    for i in items or []:
+        name = i.get("name", "").lower()
         if name in menu_dict:
-            qty = max(1, int(i.get('qty', 1)))
+            qty = max(1, int(i.get("qty", 1)))
             price = menu_dict[name]
             valid.append({"name": name, "qty": qty, "price": price})
             total += qty * price
+
     return valid, total
+
 
 async def run_worker():
     pool = await get_db_pool()
-    logger.info("🔥 Worker is active and listening...")
+    print("🔥 Worker running...")
 
     while True:
         try:
             async with pool.acquire() as conn:
-                # Pending ဖြစ်နေတဲ့ task တစ်ခုကို ဆွဲထုတ်မယ်
+
                 task = await conn.fetchrow("""
                 UPDATE task_queue SET status='processing'
                 WHERE id = (
                     SELECT id FROM task_queue
                     WHERE status='pending'
-                    ORDER BY id ASC
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                 )
-                RETURNING id, business_id, chat_id, user_text
+                RETURNING *
                 """)
 
                 if not task:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     continue
 
-                t_id = task['id']
-                b_id = task['business_id']
-                chat_id = task['chat_id']
-                user_text = task['user_text']
-                
-                logger.info(f"📩 Processing Task {t_id} for Business {b_id}")
+                b_id, chat_id, text = task['business_id'], task['chat_id'], task['user_text']
 
-                # ဆိုင်အချက်အလက် ယူမယ်
-                biz = await conn.fetchrow("SELECT tg_bot_token, shop_name FROM businesses WHERE id=$1", b_id)
+                biz = await conn.fetchrow("SELECT * FROM businesses WHERE id=$1", b_id)
                 if not biz:
-                    logger.error(f"🚫 Business {b_id} not found")
-                    await conn.execute("UPDATE task_queue SET status='failed' WHERE id=$1", t_id)
                     continue
 
                 token = biz['tg_bot_token']
-                shop_name = biz['shop_name']
-                
-                # Menu (Products) ယူမယ်
-                menu_rows = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
-                menu = [{"name": m["name"], "price": m["price"]} for m in menu_rows]
-                
-                # လက်ရှိ Order status (Pending Order) ယူမယ်
-                pending = await conn.fetchrow("SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2", chat_id, b_id)
-                current_order_json = pending['order_data'] if pending else "{}"
 
-                # AI Processing - ဒီနေရာမှာ AI က အဖြေထုတ်ပေးတာပါ
-                logger.info(f"🤖 AI is thinking for {chat_id}...")
-                res = await ai.process(user_text, shop_name, menu, current_order_json)
-                
-                # AI အဖြေကို Log မှာ ပြမယ် (Debug လုပ်ရလွယ်အောင်)
-                logger.info(f"🤖 AI Result: {json.dumps(res, ensure_ascii=False)}")
+                # CONFIRM FLOW
+                if text.upper() == "CONFIRM":
 
-                # --- Error Fix: message text is empty ဖြစ်မှာစိုးလို့ စစ်ပေးခြင်း ---
-                reply_text = res.get('reply_text')
-                if not reply_text or str(reply_text).strip() == "":
-                    reply_text = "တောင်းပန်ပါတယ်ခင်ဗျာ၊ ကျွန်တော် နားမလည်လိုက်လို့ တစ်ချက်လောက် ပြန်ပြောပေးပါဦး။"
+                    row = await conn.fetchrow("""
+                    DELETE FROM pending_orders
+                    WHERE chat_id=$1 AND business_id=$2
+                    RETURNING order_data
+                    """, chat_id, b_id)
 
-                # Database Update (Pending Order သိမ်းမယ်)
-                new_order_data = res.get('final_order_data', {})
-                valid_items, total = validate_items(new_order_data.get('items', []), menu)
-                new_order_data['items'] = valid_items
-                new_order_data['total_price'] = total
+                    if not row:
+                        await send(token, chat_id, "⚠️ အော်ဒါမရှိပါ")
+                        continue
+
+                    data = json.loads(row['order_data'])
+
+                    sub = await conn.fetchrow("""
+                    UPDATE subscriptions
+                    SET current_usage = current_usage + 1
+                    WHERE business_id=$1
+                    RETURNING *
+                    """, b_id)
+
+                    if not sub:
+                        await send(token, chat_id, "⚠️ subscription မရှိပါ")
+                        continue
+
+                    h = hashlib.md5(f"{chat_id}:{row['order_data']}".encode()).hexdigest()
+
+                    await conn.execute("""
+                    INSERT INTO orders (
+                        business_id, chat_id,
+                        customer_name, phone_no, address,
+                        payment_method, items, total_price, order_hash
+                    )
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                    """,
+                    b_id, chat_id,
+                    data.get('customer_name'),
+                    data.get('phone_no'),
+                    data.get('address'),
+                    data.get('payment_method'),
+                    json.dumps(data.get('items')),
+                    data.get('total_price',0),
+                    h
+                    )
+
+                    await send(token, chat_id, "✅ Order confirmed!")
+                    continue
+
+                # NORMAL FLOW
+                menu = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
+                menu_list = [{"name": m["name"], "price": m["price"]} for m in menu]
+
+                pending = await conn.fetchrow("""
+                SELECT order_data FROM pending_orders
+                WHERE chat_id=$1 AND business_id=$2
+                """, chat_id, b_id)
+
+                try:
+                    current_order = json.loads(pending['order_data']) if pending else {}
+                except:
+                    current_order = {}
+
+                res = await ai.process(text, biz['name'], menu_list, current_order)
+
+                valid_items, total = validate(res['final_order_data'].get('items', []), menu_list)
+
+                res['final_order_data']['items'] = valid_items
+                res['final_order_data']['total_price'] = total
 
                 await conn.execute("""
                 INSERT INTO pending_orders (chat_id, business_id, order_data)
                 VALUES ($1,$2,$3)
-                ON CONFLICT (chat_id,business_id)
-                DO UPDATE SET order_data=$3, updated_at=NOW()
-                """, chat_id, b_id, json.dumps(new_order_data))
+                ON CONFLICT (chat_id, business_id)
+                DO UPDATE SET order_data=$3
+                """, chat_id, b_id, json.dumps(res['final_order_data']))
 
-                # Telegram ဆီ စာပြန်ပို့မယ်
-                await send_telegram(token, chat_id, reply_text)
-
-                # Task ပြီးဆုံးကြောင်း မှတ်သားမယ်
-                await conn.execute("UPDATE task_queue SET status='done' WHERE id=$1", t_id)
-                logger.info(f"🏁 Task {t_id} completed successfully.")
+                await send(token, chat_id, res['reply_text'])
 
         except Exception as e:
-            logger.error(f"⚠️ Worker Loop Error: {e}")
-            await asyncio.sleep(5)
+            print("Worker crash:", e)
+            await asyncio.sleep(3)
