@@ -15,8 +15,9 @@ async def get_db_pool():
 
 async def init_db(pool):
     async with pool.acquire() as conn:
-        # ၁။ Table များ အကုန်လုံးကို အလိုအလျောက် ဆောက်ပေးမယ့် SQL
+        # ၁။ Multi-tenant အတွက် လိုအပ်သော Table များ အကုန်လုံးကို ဆောက်ပေးခြင်း
         await conn.execute("""
+            -- ဆိုင်အချက်အလက်များ သိမ်းဆည်းရန်
             CREATE TABLE IF NOT EXISTS businesses (
                 id SERIAL PRIMARY KEY,
                 shop_name TEXT,
@@ -24,6 +25,7 @@ async def init_db(pool):
                 created_at TIMESTAMP DEFAULT NOW()
             );
 
+            -- ဆိုင်တစ်ခုချင်းစီ၏ Menu များ သိမ်းဆည်းရန်
             CREATE TABLE IF NOT EXISTS products (
                 id SERIAL PRIMARY KEY,
                 business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
@@ -31,6 +33,7 @@ async def init_db(pool):
                 price INTEGER
             );
 
+            -- AI လုပ်ဆောင်ရန်အတွက် Task Queue
             CREATE TABLE IF NOT EXISTS task_queue (
                 id SERIAL PRIMARY KEY,
                 business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
@@ -41,6 +44,7 @@ async def init_db(pool):
                 created_at TIMESTAMP DEFAULT NOW()
             );
 
+            -- ယာယီ Order များ (AI မှ တွက်ချက်ထားသော JSON)
             CREATE TABLE IF NOT EXISTS pending_orders (
                 id SERIAL PRIMARY KEY,
                 business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
@@ -50,6 +54,7 @@ async def init_db(pool):
                 CONSTRAINT unique_chat_business UNIQUE (chat_id, business_id)
             );
 
+            -- အတည်ပြုပြီးသော Order များ
             CREATE TABLE IF NOT EXISTS orders (
                 id SERIAL PRIMARY KEY,
                 business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
@@ -64,12 +69,5 @@ async def init_db(pool):
                 created_at TIMESTAMP DEFAULT NOW()
             );
         """)
-
-        # ၂။ မင်းရဲ့ Bot Token ကိုပါ တခါတည်း စစ်ပြီး ထည့်ပေးထားမယ်
-        await conn.execute("""
-            INSERT INTO businesses (shop_name, tg_bot_token) 
-            VALUES ('Randy Cafe', '8789177063:AAHwEQlTSROeM-qD-zzrpFB5UKSLEFwo0jE')
-            ON CONFLICT (tg_bot_token) DO NOTHING;
-        """)
         
-        print("✅ Database Tables & Initial Data are ready!")
+        print("✅ Database Tables & Schema are ready!")
