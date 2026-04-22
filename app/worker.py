@@ -10,21 +10,18 @@ async def send(token, chat_id, text):
         text = "ဘာများ မှာယူမလဲခင်ဗျာ?"
     try:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
-        # TG API အတွက် chat_id ကို int အဖြစ် သေချာပြောင်းပို့မယ်
+        # chat_id ကို integer အဖြစ် သေချာပြောင်းပို့မယ်
         res = await http_client.post(
             url,
             json={"chat_id": int(chat_id), "text": text}
         )
-        if res.status_code != 200:
-            print(f"TG Error Status: {res.status_code} - {res.text}")
         await asyncio.sleep(0.05)
     except Exception as e:
-        print("TG error:", e)
+        print(f"TG error: {e}")
 
 def validate(items, menu):
     valid, total = [], 0
     menu_dict = {m["name"].lower(): m["price"] for m in menu}
-
     for i in items or []:
         name = i.get("name", "").lower().strip()
         if name in menu_dict:
@@ -43,7 +40,6 @@ async def run_worker():
     while True:
         try:
             async with pool.acquire() as conn:
-                # 1. Get Pending Task
                 task = await conn.fetchrow("""
                 UPDATE task_queue SET status='processing'
                 WHERE id = (
@@ -62,11 +58,10 @@ async def run_worker():
 
                 task_id = task['id']
                 b_id = task['business_id']
-                # Telegram ID ကို BigInt နဲ့ ကိုက်အောင် int() အမြဲပြောင်းသုံးမယ်
+                # String to Int conversion for Chat ID
                 clean_chat_id = int(task['chat_id'])
                 text = task['user_text']
 
-                # 2. Get Business Info
                 biz = await conn.fetchrow("SELECT name, tg_bot_token FROM businesses WHERE id=$1", b_id)
                 if not biz:
                     await conn.execute("DELETE FROM task_queue WHERE id=$1", task_id)
@@ -74,19 +69,17 @@ async def run_worker():
 
                 token = biz['tg_bot_token']
 
-                # 3. Handle CONFIRM Flow
+                # --- 1. Handle CONFIRM Flow ---
                 if text and text.upper().strip() == "CONFIRM":
                     row = await conn.fetchrow("""
-                    DELETE FROM pending_orders 
-                    WHERE chat_id=$1 AND business_id=$2
-                    RETURNING order_data
+                    DELETE FROM pending_orders WHERE chat_id=$1 AND business_id=$2 RETURNING order_data
                     """, clean_chat_id, b_id)
 
                     if not row:
                         await send(token, clean_chat_id, "⚠️ အော်ဒါမှတ်တမ်း မရှိပါခင်ဗျာ။")
                     else:
                         data = json.loads(row['order_data'])
-                        # Hash လုပ်တဲ့အခါ format error မတက်အောင် concatenation သုံးမယ်
+                        # Hash လုပ်တဲ့အခါ format specifier error မတက်အောင် + သုံးပြီး string ဆက်မယ်
                         hash_input = str(clean_chat_id) + ":" + str(row['order_data']) + ":" + str(datetime.now())
                         h = hashlib.md5(hash_input.encode()).hexdigest()
                         
@@ -101,22 +94,22 @@ async def run_worker():
                     await conn.execute("DELETE FROM task_queue WHERE id=$1", task_id)
                     continue
 
-                # 4. Normal AI Process Flow
+                # --- 2. AI Processing Flow ---
                 menu = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
                 menu_list = [{"name": m["name"], "price": m["price"]} for m in menu]
 
                 pending = await conn.fetchrow("SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2", clean_chat_id, b_id)
                 current_order = json.loads(pending['order_data']) if pending else {}
 
-                # AI Processing
+                # AI ဆီက result ယူမယ်
                 res = await ai.process(text, biz['name'], menu_list, current_order)
-
-                # Validation & Update
-                valid_items, total = validate(res['final_order_data'].get('items', []), menu_list)
+                
+                # Order Data ကို ပြန်စစ်မယ်
+                valid_items, total = validate(res.get('final_order_data', {}).get('items', []), menu_list)
                 res['final_order_data']['items'] = valid_items
                 res['final_order_data']['total_price'] = total
 
-                # 5. Save Pending State
+                # --- 3. Save Pending Order ---
                 await conn.execute("""
                 INSERT INTO pending_orders (chat_id, business_id, order_data, updated_at)
                 VALUES ($1,$2,$3, NOW())
@@ -124,15 +117,13 @@ async def run_worker():
                 DO UPDATE SET order_data=$3, updated_at=NOW()
                 """, clean_chat_id, b_id, json.dumps(res['final_order_data']))
 
-                # 6. Send Result to Telegram
+                # --- 4. Send Message & Cleanup ---
                 await send(token, clean_chat_id, res['reply_text'])
-
-                # Task ကို အောင်မြင်စွာ ဖျက်ပစ်
                 await conn.execute("DELETE FROM task_queue WHERE id=$1", task_id)
 
         except Exception as e:
-            print(f"🔥 Worker Error: {e}")
-            # Error ဖြစ်ရင် task ကို pending ပြန်ပို့ပြီး ခဏနားမယ်
+            # Error log ထုတ်တဲ့အခါ f-string ကို ရှောင်ပြီး format သုံးမယ်
+            print("🔥 Worker Error: {}".format(e))
             if 'task_id' in locals():
                 try:
                     async with pool.acquire() as conn:
