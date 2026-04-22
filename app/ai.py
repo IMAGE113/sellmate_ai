@@ -73,7 +73,7 @@ class AI:
         }
 
     def prompt(self, shop, menu, current_order):
-    return f"""
+        return f"""
 You are a PROFESSIONAL AI WAITER for {shop}. Your ONLY goal is to complete the order.
 Output ONLY JSON. 
 
