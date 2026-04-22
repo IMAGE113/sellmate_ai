@@ -72,35 +72,36 @@ class AI:
         }
 
     # ==========================================
-    # 🎯 IMPROVED PROMPT (WITH PAYMENT LOGIC)
+    # 🎯 IMPROVED PROMPT (STRICT ORDER FLOW)
     # ==========================================
     def prompt(self, shop, menu, current_order):
         return f"""
-You are a PROFESSIONAL AI WAITER for {shop}. Your ONLY goal is to complete the order efficiently.
-Output ONLY JSON. 
+You are a PROFESSIONAL AI WAITER for {shop}. 
+Your ONLY goal is to extract order details. DO NOT use old data from outside this conversation.
 
 ━━━━━━━━━━━━━━━━━━━━━━
 🚨 ORDER FLOW PRIORITY
 ━━━━━━━━━━━━━━━━━━━━━━
 1. FIRST STEP: Always prioritize adding ITEMS.
-2. ONCE ITEMS EXIST: Ask for missing details one by one: 
-   Items -> Name -> Phone -> Address -> Payment Method (COD or Prepaid).
-3. DO NOT LOOP: If information exists in CURRENT STATE, do not ask for it again.
+2. DO NOT ask for personal info until at least ONE item is added.
+3. ONCE ITEMS EXIST: Ask for Name -> Phone -> Address -> Payment Method (COD/Prepaid).
+4. If a field in CURRENT STATE is already filled, DO NOT ask for it again.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-📋 ORDER SUMMARY DESIGN
+📋 ORDER SUMMARY LAYOUT (STRICT)
 ━━━━━━━━━━━━━━━━━━━━━━
-When showing the summary, use this format:
+Show the summary ONLY when all info is collected, using this format:
 ---
-🛍️ **Order Summary**
+📝 **အော်ဒါအနှစ်ချုပ်**
+------------------
+🛒 **မှာယူသည့်ပစ္စည်းများ:**
 • [Item Name] x [Qty]
 ------------------
-💰 **Total: [Amount] Kyats**
-👤 **Customer:** [Name]
-📞 **Phone:** [Phone]
-📍 **Address:** [Address]
-💳 **Payment:** [COD or Prepaid]
----
+👤 **အမည်:** [Name]
+📞 **ဖုန်း:** [Phone]
+📍 **လိပ်စာ:** [Address]
+💳 **ငွေပေးချေမှု:** [COD or Prepaid]
+------------------
 မှန်ကန်ပါက **Confirm** ဟု ရိုက်ပေးပါ။
 
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -111,24 +112,26 @@ CURRENT STATE: {json.dumps(current_order, ensure_ascii=False)}
 
 OUTPUT JSON ONLY:
 {{
-  "reply_text": "Myanmar response following the flow above",
+  "reply_text": "...",
   "intent": "info_gathering OR confirm_order",
   "final_order_data": {{ 
-    "customer_name": "", 
-    "phone_no": "", 
-    "address": "", 
-    "payment_method": "COD", 
+    "customer_name": "...", 
+    "phone_no": "...", 
+    "address": "...", 
+    "payment_method": "...", 
     "items": [] 
   }}
 }}
 """
 
     async def process(self, text, shop, menu, current_order):
+        # 🔥 Fix: Reset data when /start is called to prevent old data persistence
         if text.strip() == "/start":
+            blank_order = {"customer_name": "", "phone_no": "", "address": "", "payment_method": "COD", "items": []}
             return {
                 "reply_text": f"မင်္ဂလာပါခင်ဗျာ! {shop} မှ ကြိုဆိုပါတယ်။ 🙏\nဒီနေ့ ဘာများ မှာယူမလဲခင်ဗျာ? မှာယူလိုတဲ့ ပစ္စည်းအမည်လေး ပြောပေးပါ။",
                 "intent": "info_gathering",
-                "final_order_data": current_order
+                "final_order_data": blank_order
             }
 
         prompt_text = self.prompt(shop, menu, current_order)
@@ -142,7 +145,7 @@ OUTPUT JSON ONLY:
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
                         {"role": "system", "content": "Output STRICT JSON only."},
-                        {"role": "user", "content": prompt_text + f"\n\nUSER: {text}"}
+                        {"role": "user", "content": f"{prompt_text}\n\nUSER INPUT: {text}"}
                     ],
                     "temperature": 0,
                     "response_format": {"type": "json_object"}
