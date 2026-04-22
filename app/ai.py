@@ -11,7 +11,6 @@ class AI:
             text = re.sub(r"```json|```", "", text).strip()
             data = json.loads(text)
         except Exception:
-            # Context-aware fallback logic
             if current_order.get("items"):
                 return {
                     "reply_text": "အော်ဒါဆက်လုပ်ချင်ပါသေးလားခင်ဗျာ? ဆက်ပြောနိုင်ပါတယ်။",
@@ -26,7 +25,6 @@ class AI:
 
         ai_data = data.get("final_order_data", {})
 
-        # Item Extraction & Duplicate Merge
         raw_items = ai_data.get("items") or current_order.get("items", [])
         merged_items = {}
         for item in raw_items:
@@ -43,7 +41,6 @@ class AI:
 
         cleaned_items = [{"name": k, "qty": v} for k, v in merged_items.items()]
 
-        # Hallucination Guard for items
         if ai_data.get("items") and not cleaned_items:
             return {
                 "reply_text": "မီနူးထဲမှာ မရှိတဲ့ပစ္စည်း ဖြစ်နေပါတယ်ခင်ဗျာ။ တစ်ချက်ပြန်စစ်ပေးပါ။",
@@ -51,9 +48,12 @@ class AI:
                 "final_order_data": current_order
             }
 
-        # Payment & Data Merge
+        # Payment Logic Refinement
         payment = (ai_data.get("payment_method") or current_order.get("payment_method", "COD")).lower()
-        payment = "Prepaid" if "pre" in payment else "COD"
+        if "pre" in payment or "kpay" in payment or "wave" in payment:
+            payment = "Prepaid"
+        else:
+            payment = "COD"
 
         merged = {
             "customer_name": str(ai_data.get("customer_name") or current_order.get("customer_name", "")),
@@ -63,7 +63,6 @@ class AI:
             "items": cleaned_items
         }
 
-        # 🔥 Fix 1: Reply Sanitation (Prevents Telegram Crash)
         reply = str(data.get("reply_text") or "ဘာများ မှာယူမလဲခင်ဗျာ?").strip()
         
         return {
@@ -72,19 +71,37 @@ class AI:
             "final_order_data": merged
         }
 
+    # ==========================================
+    # 🎯 IMPROVED PROMPT (WITH PAYMENT LOGIC)
+    # ==========================================
     def prompt(self, shop, menu, current_order):
         return f"""
-You are a PROFESSIONAL AI WAITER for {shop}. Your ONLY goal is to complete the order.
+You are a PROFESSIONAL AI WAITER for {shop}. Your ONLY goal is to complete the order efficiently.
 Output ONLY JSON. 
 
 ━━━━━━━━━━━━━━━━━━━━━━
-🚨 CRITICAL RULES (STRICT ENFORCEMENT)
+🚨 ORDER FLOW PRIORITY
 ━━━━━━━━━━━━━━━━━━━━━━
-1. DO NOT LOOP: If you already have the Customer Name, Phone, Address, and Items, STOP ASKING QUESTIONS.
-2. SUMMARY FIRST: Once you have all data, provide a CLEAR Summary and ask the user: "အော်ဒါတင်ဖို့ အတည်ပြုပေးပါ (Confirm လို့ ရိုက်ပေးပါ)။"
-3. NO SMALL TALK: Don't wish them health or long life constantly. Be professional and efficient.
-4. LANGUAGE: Always respond in clear Myanmar Unicode.
-5. DATA PERSISTENCE: Use the CURRENT STATE provided. If a field is filled, don't ask for it again.
+1. FIRST STEP: Always prioritize adding ITEMS.
+2. ONCE ITEMS EXIST: Ask for missing details one by one: 
+   Items -> Name -> Phone -> Address -> Payment Method (COD or Prepaid).
+3. DO NOT LOOP: If information exists in CURRENT STATE, do not ask for it again.
+
+━━━━━━━━━━━━━━━━━━━━━━
+📋 ORDER SUMMARY DESIGN
+━━━━━━━━━━━━━━━━━━━━━━
+When showing the summary, use this format:
+---
+🛍️ **Order Summary**
+• [Item Name] x [Qty]
+------------------
+💰 **Total: [Amount] Kyats**
+👤 **Customer:** [Name]
+📞 **Phone:** [Phone]
+📍 **Address:** [Address]
+💳 **Payment:** [COD or Prepaid]
+---
+မှန်ကန်ပါက **Confirm** ဟု ရိုက်ပေးပါ။
 
 ━━━━━━━━━━━━━━━━━━━━━━
 📌 CONTEXT DATA
@@ -92,17 +109,9 @@ Output ONLY JSON.
 MENU: {json.dumps(menu, ensure_ascii=False)}
 CURRENT STATE: {json.dumps(current_order, ensure_ascii=False)}
 
-━━━━━━━━━━━━━━━━━━━━━━
-🎯 OUTPUT GUIDELINE
-━━━━━━━━━━━━━━━━━━━━━━
-- If info is missing: reply_text = "ကျန်ရှိနေတဲ့ [Name/Phone/Address] လေး ပြောပေးပါဦးခင်ဗျာ။"
-- If all info is present: 
-    reply_text = "အော်ဒါ အနှစ်ချုပ်ကတော့... [Items & Total]. အားလုံးမှန်ကန်ရင် Confirm လို့ ရိုက်ပြီး အော်ဒါတင်နိုင်ပါပြီ။"
-    intent = "info_gathering" (Wait for user to say Confirm)
-
 OUTPUT JSON ONLY:
 {{
-  "reply_text": "...",
+  "reply_text": "Myanmar response following the flow above",
   "intent": "info_gathering OR confirm_order",
   "final_order_data": {{ 
     "customer_name": "", 
@@ -115,9 +124,14 @@ OUTPUT JSON ONLY:
 """
 
     async def process(self, text, shop, menu, current_order):
+        if text.strip() == "/start":
+            return {
+                "reply_text": f"မင်္ဂလာပါခင်ဗျာ! {shop} မှ ကြိုဆိုပါတယ်။ 🙏\nဒီနေ့ ဘာများ မှာယူမလဲခင်ဗျာ? မှာယူလိုတဲ့ ပစ္စည်းအမည်လေး ပြောပေးပါ။",
+                "intent": "info_gathering",
+                "final_order_data": current_order
+            }
+
         prompt_text = self.prompt(shop, menu, current_order)
-        
-        # 🔥 Fix 2: Input Normalization (Edge-case Confirm Bug)
         clean_input = re.sub(r"[^\w\u1000-\u109F]+", "", text.lower())
 
         try:
@@ -139,7 +153,6 @@ OUTPUT JSON ONLY:
             content = res.json()["choices"][0]["message"]["content"]
             result = self.safe_parse(content, current_order, menu)
 
-            # Strict Confirm Guard
             confirm_words = ["confirm", "yes", "ok", "ဟုတ်", "မှန်ပါတယ်", "အိုကေ", "မှာမယ်"]
             if result["intent"] == "confirm_order":
                 if clean_input not in confirm_words and not any(w in clean_input for w in confirm_words):
