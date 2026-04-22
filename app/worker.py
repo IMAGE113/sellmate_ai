@@ -9,7 +9,6 @@ async def send(token, chat_id, text):
     if not text:
         text = "ဘာများ မှာယူမလဲခင်ဗျာ?"
     try:
-        # CTO FIX: URL format ကို ပိုစိတ်ချရအောင် လုပ်တယ်
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         res = await http_client.post(
             url,
@@ -23,11 +22,10 @@ async def send(token, chat_id, text):
 
 def validate(items, menu):
     valid, total = [], 0
-    # Menu price တွေကို dict လုပ်ထားတာ မှန်တယ်
     menu_dict = {m["name"].lower(): m["price"] for m in menu}
 
     for i in items or []:
-        name = i.get("name", "").lower().strip() # strip ပါ ထည့်လိုက်မယ်
+        name = i.get("name", "").lower().strip()
         if name in menu_dict:
             try:
                 qty = max(1, int(i.get("qty", 1)))
@@ -78,24 +76,26 @@ async def run_worker():
                     DELETE FROM pending_orders 
                     WHERE chat_id=$1 AND business_id=$2
                     RETURNING order_data
-                    """, chat_id, b_id)
+                    """, str(chat_id), b_id)
 
                     if not row:
                         await send(token, chat_id, "⚠️ အော်ဒါမှတ်တမ်း မရှိပါခင်ဗျာ။")
                     else:
                         data = json.loads(row['order_data'])
-                        # Order Hash for duplicate protection
-                        h = hashlib.md5(f"{chat_id}:{row['order_data']}:{datetime.now()}".encode()).hexdigest()
+                        
+                        # ✅ CTO FIX: Invalid format specifier error ကာကွယ်ဖို့ concatenation သုံးမယ်
+                        order_str = str(row['order_data'])
+                        hash_input = str(chat_id) + ":" + order_str + ":" + str(datetime.now())
+                        h = hashlib.md5(hash_input.encode()).hexdigest()
                         
                         await conn.execute("""
                         INSERT INTO orders (business_id, chat_id, customer_name, phone_no, address, payment_method, items, total_price, order_hash)
                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                         ON CONFLICT DO NOTHING
-                        """, b_id, chat_id, data.get('customer_name'), data.get('phone_no'), data.get('address'), data.get('payment_method'), json.dumps(data.get('items')), data.get('total_price', 0), h)
+                        """, b_id, str(chat_id), data.get('customer_name'), data.get('phone_no'), data.get('address'), data.get('payment_method'), json.dumps(data.get('items')), data.get('total_price', 0), h)
                         
                         await send(token, chat_id, "✅ အော်ဒါတင်ခြင်း အောင်မြင်သွားပါပြီ။ ကျေးဇူးတင်ပါတယ်ခင်ဗျာ!")
                     
-                    # Task ပြီးရင် ဖျက်ရမယ် (ဒါမှမဟုတ် status ပြောင်းရမယ်)
                     await conn.execute("DELETE FROM task_queue WHERE id=$1", task_id)
                     continue
 
@@ -103,7 +103,7 @@ async def run_worker():
                 menu = await conn.fetch("SELECT name, price FROM products WHERE business_id=$1", b_id)
                 menu_list = [{"name": m["name"], "price": m["price"]} for m in menu]
 
-                pending = await conn.fetchrow("SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2", chat_id, b_id)
+                pending = await conn.fetchrow("SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2", str(chat_id), b_id)
                 current_order = json.loads(pending['order_data']) if pending else {}
 
                 # AI Processing
@@ -120,18 +120,20 @@ async def run_worker():
                 VALUES ($1,$2,$3, NOW())
                 ON CONFLICT (chat_id, business_id)
                 DO UPDATE SET order_data=$3, updated_at=NOW()
-                """, chat_id, b_id, json.dumps(res['final_order_data']))
+                """, str(chat_id), b_id, json.dumps(res['final_order_data']))
 
                 # 5. Send Result to Telegram
                 await send(token, chat_id, res['reply_text'])
 
-                # IMPORTANT: Task ကို ပြီးသွားကြောင်း မှတ်တမ်းတင်/ဖျက်ပစ်
+                # Task ကို ပြီးသွားကြောင်း ဖျက်ပစ်
                 await conn.execute("DELETE FROM task_queue WHERE id=$1", task_id)
 
         except Exception as e:
             print(f"🔥 Worker Error at {datetime.now()}: {e}")
-            if 'task_id' in locals():
-                # Error တက်ရင် နောက်တစ်ခါ ပြန်လုပ်နိုင်အောင် status ပြန်ပြင်မယ် (Optional)
-                async with pool.acquire() as conn:
-                    await conn.execute("UPDATE task_queue SET status='pending' WHERE id=$1", task_id)
+            # Error ဖြစ်တဲ့ task ကို ပြန်စစ်နိုင်အောင် Status ပြန်ပြင်ပေးမယ်
+            try:
+                if 'task_id' in locals():
+                    async with pool.acquire() as conn:
+                        await conn.execute("UPDATE task_queue SET status='pending' WHERE id=$1", task_id)
+            except: pass
             await asyncio.sleep(2)
