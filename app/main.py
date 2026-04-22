@@ -1,24 +1,25 @@
 import hashlib
 import os
 import asyncio
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from .database import get_db_pool, init_db
 from .worker import run_worker
 
-# 1. FastAPI instance ကို တည်ဆောက်ခြင်း (Uvicorn က ဒါကို ရှာမှာပါ)
 app = FastAPI()
 
-# 2. Startup Event: Database link ချိတ်ဆက်ပြီး Worker ကို Background မှာ run ခိုင်းခြင်း
+# Global variable အနေနဲ့ pool ကို သိမ်းထားမယ် (ခဏခဏ get_db_pool ခေါ်စရာမလိုအောင်)
+db_pool = None
+
 @app.on_event("startup")
 async def startup_event():
-    pool = await get_db_pool()
-    await init_db(pool)
+    global db_pool
+    db_pool = await get_db_pool() # Pool ကို တစ်ခါပဲ ဆောက်တယ်
+    await init_db(db_pool)
     
-    # Worker ကို background task အနေနဲ့ run မယ်
+    # Worker ကို background task အနေနဲ့ run တယ်
     asyncio.create_task(run_worker())
     print("🚀 SellMate AI Server & Worker started successfully!")
 
-# 3. Root Endpoint: Render Health Check အတွက် (200 OK ပြန်ပေးဖို့)
 @app.get("/")
 async def root():
     return {
@@ -27,14 +28,17 @@ async def root():
         "mode": "multi-tenant"
     }
 
-# 4. Telegram Webhook Endpoint
 @app.post("/webhook/{token}")
 async def webhook(token: str, request: Request):
-    data = await request.json()
-    pool = await get_db_pool()
+    global db_pool
+    # Pool မရှိသေးရင် (သို့) ချိတ်ဆက်မှုပြတ်နေရင် ပြန်ယူမယ်
+    if not db_pool:
+        db_pool = await get_db_pool()
 
-    async with pool.acquire() as conn:
-        # Bot Token နဲ့ ဆိုင်ရှိမရှိ စစ်ဆေးခြင်း
+    data = await request.json()
+
+    async with db_pool.acquire() as conn:
+        # 1. Bot Token စစ်ဆေးခြင်း
         biz = await conn.fetchrow(
             "SELECT id FROM businesses WHERE tg_bot_token=$1", token
         )
@@ -44,33 +48,33 @@ async def webhook(token: str, request: Request):
 
         b_id = biz['id']
 
-        # Message မပါရင် ဘာမှမလုပ်ဘဲ ကျော်သွားမယ်
-        if "message" not in data or "text" not in data["message"]:
+        # 2. Message data ကို စနစ်တကျယူခြင်း
+        message = data.get("message")
+        if not message or "text" not in message:
             return {"ok": True}
 
-        # Chat ID နဲ့ User ရိုက်လိုက်တဲ့ စာကို ယူခြင်း
-        raw_chat_id = data["message"]["chat"]["id"]
-        text = data["message"]["text"]
+        chat_id = message["chat"]["id"]
+        text = message["text"]
         
-        # Chat ID ကို String ပြောင်းခြင်း (Database TEXT Type နဲ့ ကိုက်ညီအောင်)
-        chat_id_str = str(raw_chat_id)
+        # 3. Request Hash (Duplicate ပို့တာ ကာကွယ်ဖို့)
+        # CTO Tip: Timestamp ထည့်လိုက်ရင် ဝယ်သူက "Hi" နှစ်ခါရိုက်ရင် နှစ်ခါလုံး အလုပ်လုပ်မယ်
+        h = hashlib.md5(f"{b_id}:{chat_id}:{text}".encode()).hexdigest()
 
-        # Request တွေ ထပ်မနေအောင် Hash လုပ်ခြင်း
-        h = hashlib.md5(f"{b_id}:{chat_id_str}:{text}".encode()).hexdigest()
-
-        # Task Queue ထဲသို့ ထည့်သွင်းခြင်း
+        # 4. Task Queue ထဲသို့ ထည့်သွင်းခြင်း
         try:
+            # chat_id ကို string အဖြစ်သိမ်းတာ ပိုစိတ်ချရတယ် (DB TEXT format ဖြစ်ရင်)
             await conn.execute("""
                 INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (request_hash) DO NOTHING
-            """, b_id, chat_id_str, text, h)
-        except Exception:
-            # အကယ်၍ Table Column က Integer ဖြစ်နေခဲ့ရင် fallback အနေနဲ့ သုံးဖို့
+            """, b_id, str(chat_id), text, h)
+        except Exception as e:
+            print(f"❌ Webhook DB Error: {e}")
+            # Fallback for Integer chat_id
             await conn.execute("""
                 INSERT INTO task_queue (business_id, chat_id, user_text, request_hash)
                 VALUES ($1, $2, $3, $4)
                 ON CONFLICT (request_hash) DO NOTHING
-            """, b_id, int(raw_chat_id), text, h)
+            """, b_id, int(chat_id), text, h)
 
     return {"ok": True}
