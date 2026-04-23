@@ -82,7 +82,6 @@ class AI:
         return {"final_order_data": merged, "reply_text": data.get("reply_text", "ဟုတ်ကဲ့ခင်ဗျာ၊ ဘာများ ထပ်ယူမလဲခင်ဗျာ။")}
 
     def prompt(self, shop, menu, current_order):
-        # AI ကို JSON Format အတိအကျပေးဖို့ ပိုပြီး တိတိကျကျ ခိုင်းထားပါတယ်
         return f"""
 You are a PROFESSIONAL AI WAITER for {shop}. Respond in UNICODE BURMESE.
 Extract: Name, Phone, Address, Payment, Items.
@@ -97,10 +96,8 @@ Return ONLY a valid JSON object with 'reply_text' and 'final_order_data'.
         clean_input = re.sub(r"[^\w\u1000-\u109F]+", "", clean_text)
         
         # 🔄 RESTART & GREETING LOGIC
-        greetings = ["hi", "hello", "hey", "မင်္ဂလာပါ", "ဟိုင်း", "ဟယ်လို", "start", "/start", "restart", "ပြန်လုပ်"]
-        is_greeting = any(clean_text == g for g in greetings) or any(clean_input == g for g in greetings)
-
-        if is_greeting:
+        greetings = ["hi", "hello", "hey", "မင်္ဂလာပါ", "start", "/start", "restart"]
+        if any(clean_text == g for g in greetings) or any(clean_input == g for g in greetings):
             return {
                 "reply_text": f"မင်္ဂလာပါ! {shop} မှ ကြိုဆိုပါတယ်။ 🙏\nဒီနေ့ ဘာများ မှာယူမလဲခင်ဗျာ?",
                 "intent": "info_gathering",
@@ -108,39 +105,7 @@ Return ONLY a valid JSON object with 'reply_text' and 'final_order_data'.
                 "ui": "main_menu"
             }
 
-        # ✅ REVIEW STATE GATEKEEPER
-        is_ready = all([
-            current_order.get("customer_name"),
-            current_order.get("phone_no"),
-            current_order.get("address"),
-            current_order.get("payment_method"),
-            len(current_order.get("items", [])) > 0
-        ])
-
-        if is_ready:
-            confirm_words = ["confirm", "yes", "ok", "ဟုတ်", "မှန်တယ်", "အိုကေ", "မှာမယ်", "ရပြီ"]
-            edit_words = ["မဟုတ်", "မယူ", "မသောက်", "ပြင်", "change", "replace", "remove", "အစား", "ဖြုတ်"]
-            
-            is_confirm = any(w in clean_input for w in confirm_words)
-            is_edit_intent = any(w in clean_text for w in edit_words)
-            mentions_menu = any(m["name"].lower() in clean_text for m in menu)
-
-            if is_confirm and not mentions_menu:
-                return {
-                    "reply_text": "အော်ဒါကို အတည်ပြုလိုက်ပါပြီ။ ကျေးဇူးတင်ပါတယ်! 🙏",
-                    "intent": "confirm_order",
-                    "final_order_data": current_order
-                }
-
-            if not is_edit_intent and not mentions_menu:
-                return {
-                    "reply_text": self.build_summary_layout(current_order),
-                    "intent": "review_order",
-                    "final_order_data": current_order,
-                    "ui": "confirm_buttons"
-                }
-
-        # 🧠 AI PARSING ENGINE
+        # 🧠 AI PARSING ENGINE (အမြဲတမ်း AI ဆီ အရင်ပို့မယ်)
         for attempt in range(2):
             try:
                 res = await http_client.post(
@@ -158,7 +123,8 @@ Return ONLY a valid JSON object with 'reply_text' and 'final_order_data'.
                 parse_result = self.safe_parse(content, current_order, menu, text)
                 updated_order = parse_result["final_order_data"]
 
-                is_now_ready = all([
+                # ✅ IS_READY Placement (AI က data ထုတ်ပြီးမှ ဒီနေရာမှာ စစ်မယ်)
+                is_ready = all([
                     updated_order.get("customer_name"),
                     updated_order.get("phone_no"),
                     updated_order.get("address"),
@@ -166,7 +132,18 @@ Return ONLY a valid JSON object with 'reply_text' and 'final_order_data'.
                     len(updated_order.get("items", [])) > 0
                 ])
 
-                if is_now_ready:
+                if is_ready:
+                    confirm_words = ["confirm", "yes", "ok", "ဟုတ်", "မှန်တယ်", "အိုကေ", "မှာမယ်"]
+                    # Mentions menu check to prevent wrong confirmation
+                    mentions_menu = any(m["name"].lower() in clean_text for m in menu)
+                    
+                    if any(w in clean_input for w in confirm_words) and not mentions_menu:
+                        return {
+                            "reply_text": "အော်ဒါကို အတည်ပြုလိုက်ပါပြီ။ ကျေးဇူးတင်ပါတယ်! 🙏",
+                            "intent": "confirm_order",
+                            "final_order_data": updated_order
+                        }
+                    
                     return {
                         "reply_text": self.build_summary_layout(updated_order),
                         "intent": "review_order",
@@ -174,6 +151,7 @@ Return ONLY a valid JSON object with 'reply_text' and 'final_order_data'.
                         "ui": "confirm_buttons"
                     }
 
+                # မစုံသေးရင် AI က ပြန်ခိုင်းတဲ့ မေးခွန်းအတိုင်း မေးမယ်
                 return {
                     "reply_text": parse_result["reply_text"],
                     "intent": "info_gathering",
