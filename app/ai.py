@@ -53,11 +53,16 @@ class AI:
             "items": cleaned_items
         }
 
+        # 🔥 Logic check: If everything is collected, ensure intent is confirm_order
+        intent = data.get("intent", "info_gathering")
+        if all([merged["customer_name"], merged["phone_no"], merged["address"], merged["payment_method"], merged["items"]]):
+            intent = "confirm_order"
+
         reply = str(data.get("reply_text") or "ဆက်လက်မှာယူနိုင်ပါတယ်ခင်ဗျာ။").strip()
         
         return {
             "reply_text": reply,
-            "intent": data.get("intent", "info_gathering"),
+            "intent": intent,
             "final_order_data": merged
         }
 
@@ -67,18 +72,18 @@ class AI:
     def prompt(self, shop, menu, current_order):
         return f"""
 You are a PROFESSIONAL AI WAITER for {shop}. 
-Task: Extract order details (Items, Name, Phone, Address).
+Task: Extract order details (Items, Name, Phone, Address, Payment).
 
 ━━━━━━━━━━━━━━━━━━━━━━
 🚨 MANDATORY RULES (STRICT COMPLIANCE)
 ━━━━━━━━━━━━━━━━━━━━━━
 1. BE DIRECT: No extra greetings or repeating customer names.
-2. STEP 1 (Personal Info): Ask for Name, Phone, and Address in ONE sentence: "အော်ဒါတင်ပေးဖို့အတွက် အမည်၊ ဖုန်းနံပါတ်၊ လိပ်စာလေး ပေးပေးပါခင်ဗျာ။"
-3. STEP 2 (Payment Inquiry): Once personal info is received, ask for payment separately: "ငွေပေးချေမှုပုံစံကို COD (အိမ်ရောက်ငွေချေ) လား ဒါမှမဟုတ် Prepaid (ဖုန်းနဲ့ကြိုလွှဲ) လား ပြောပေးပါခင်ဗျာ။"
-4. AUTOMATIC SUMMARY: Show the summary ONLY after ALL fields (including Payment) are collected. Do NOT ask "Do you want to see summary?". Just show it.
+2. STEP 1 (Personal Info): Ask for Name, Phone, and Address in ONE sentence if missing.
+3. STEP 2 (Payment Inquiry): Once personal info is received, ask for payment separately.
+4. AUTOMATIC SUMMARY: Once you have Items, Name, Phone, Address, AND Payment, you MUST display the summary layout in 'reply_text' and set intent to 'confirm_order'. Do NOT ask to show it, just show it.
 
 ━━━━━━━━━━━━━━━━━━━━━━
-📋 ORDER SUMMARY LAYOUT
+📋 ORDER SUMMARY LAYOUT (ONLY when all data is present)
 ━━━━━━━━━━━━━━━━━━━━━━
 📝 **အော်ဒါအနှစ်ချုပ်**
 ━━━━━━━━━━━━━━
@@ -100,14 +105,13 @@ CURRENT STATE: {json.dumps(current_order, ensure_ascii=False)}
 
 OUTPUT JSON ONLY:
 {{
-  "reply_text": "Direct Burmese response following the rules above",
+  "reply_text": "Direct response or the full Summary Layout",
   "intent": "info_gathering OR confirm_order",
   "final_order_data": {{ ... }}
 }}
 """
 
     async def process(self, text, shop, menu, current_order):
-        # 🔥 Fix: Reset data when /start is called to prevent old data persistence
         if text.strip() == "/start":
             blank_order = {"customer_name": "", "phone_no": "", "address": "", "payment_method": "", "items": []}
             return {
@@ -141,7 +145,9 @@ OUTPUT JSON ONLY:
             confirm_words = ["confirm", "yes", "ok", "ဟုတ်", "မှန်ပါတယ်", "အိုကေ", "မှာမယ်"]
             if result["intent"] == "confirm_order":
                 if clean_input not in confirm_words and not any(w in clean_input for w in confirm_words):
-                    result["intent"] = "info_gathering"
+                    # If it's the first time showing summary, keep it as confirm_order to show summary
+                    # Only reset if they talk about something else entirely
+                    pass 
                 
                 if not result["final_order_data"].get("items"):
                     result["intent"] = "info_gathering"
