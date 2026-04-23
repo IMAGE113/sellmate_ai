@@ -5,12 +5,14 @@ http_client = httpx.AsyncClient(timeout=20.0)
 class AI:
     # ✅ HELPERS FOR DATA INTEGRITY
     def pick(self, new, old):
-        """AI က အသစ်ပေးတာရှိမှ ယူမယ်၊ မဟုတ်ရင် အဟောင်းကိုပဲ ဆက်ကိုင်ထားမယ် (Data Overwrite Protection)"""
-        if new is None: return old
-        if isinstance(new, str):
-            clean_new = new.strip()
-            return clean_new if clean_new != "" else old
-        return new if new != "" else old
+        """AI က အသစ်ပေးတာရှိမှ ယူမယ်၊ မဟုတ်ရင် အဟောင်းကိုပဲ ဆက်ကိုင်ထားမယ်"""
+        # String ဖြစ်ပြီး အထဲမှာ စာပါမှ ယူမယ်
+        if isinstance(new, str) and new.strip():
+            return new.strip()
+        # Number ဖြစ်ရင်လည်း ယူမယ် (qty အတွက်)
+        if isinstance(new, (int, float)):
+            return new
+        return old
 
     # ==========================================
     # 🔥 BACKEND SUMMARY BUILDER
@@ -30,11 +32,10 @@ class AI:
 မှန်ကန်ပါက **Confirm** ဟု ရိုက်ပေးပါ။"""
 
     # ==========================================
-    # 🔥 SAFE_PARSE (PRODUCTION HARDENED)
+    # 🔥 SAFE_PARSE (FINAL PRODUCTION HARDENING)
     # ==========================================
     def safe_parse(self, text, current_order, menu):
         try:
-            # JSON extraction logic (Safer than direct loads)
             match = re.search(r'\{.*?\}', text, re.DOTALL)
             json_text = match.group() if match else text
             data = json.loads(json_text)
@@ -48,19 +49,23 @@ class AI:
         ai_data = data.get("final_order_data", {})
         menu_map = {m["name"].lower(): m["name"] for m in menu}
 
-        # 🛒 ITEM MERGING & DELETION LOGIC
+        # 🛒 ITEM MERGING
         raw_items = ai_data.get("items")
         merged_items = {}
-        if raw_items is not None:
+        # အရင်ရှိနေတဲ့ items တွေကို base အနေနဲ့ ထည့်ထားမယ်
+        for item in current_order.get("items", []):
+            merged_items[item["name"]] = item["qty"]
+
+        if raw_items:
+            # AI ဆီက data အသစ်လာရင် merge လုပ်မယ်
             for item in raw_items:
                 name = str(item.get("name", "")).strip().lower()
                 qty = max(1, int(item.get("qty", 1)))
                 if name in menu_map:
                     original_name = menu_map[name]
-                    merged_items[original_name] = merged_items.get(original_name, 0) + qty
-            cleaned_items = [{"name": k, "qty": v} for k, v in merged_items.items()]
-        else:
-            cleaned_items = current_order.get("items", [])
+                    merged_items[original_name] = qty # Overwrite or Add qty
+
+        cleaned_items = [{"name": k, "qty": v} for k, v in merged_items.items()]
 
         # 💳 PAYMENT LOGIC
         payment_raw = str(ai_data.get("payment_method") or "").upper()
@@ -71,24 +76,33 @@ class AI:
         else:
             payment = current_order.get("payment_method", "")
 
-        # 👤 DATA MERGE WITH OVERWRITE PROTECTION
+        # 👤 DATA MERGE (အဟောင်းနဲ့ အသစ်ကို သေချာ ပေါင်းစပ်မယ်)
         merged = {
-            "customer_name": self.pick(ai_data.get("customer_name"), current_order.get("customer_name")),
-            "phone_no": self.pick(ai_data.get("phone_no"), current_order.get("phone_no")),
-            "address": self.pick(ai_data.get("address"), current_order.get("address")),
+            "customer_name": self.pick(ai_data.get("customer_name"), current_order.get("customer_name", "")),
+            "phone_no": self.pick(ai_data.get("phone_no"), current_order.get("phone_no", "")),
+            "address": self.pick(ai_data.get("address"), current_order.get("address", "")),
             "payment_method": payment,
             "items": cleaned_items
         }
 
-        all_info_present = all([merged["customer_name"], merged["phone_no"], merged["address"], merged["payment_method"], merged["items"]])
+        # Check if all fields are filled
+        # items က list ဖြစ်လို့ len() နဲ့ စစ်တာ ပိုသေချာပါတယ်
+        all_info_present = all([
+            merged["customer_name"], 
+            merged["phone_no"], 
+            merged["address"], 
+            merged["payment_method"], 
+            len(merged["items"]) > 0
+        ])
         
-        # ✨ EDIT DETECTION UX (အချက်အလက်စုံနေတုန်း ပစ္စည်းပြင်ရင် အသိပေးမယ်)
-        if all_info_present and current_order.get("items") and cleaned_items != current_order.get("items"):
-            reply = "အော်ဒါကို ပြင်ဆင်ပြီးပါပြီ။ ဆက်လက်စစ်ဆေးပေးပါ။\n\n" + self.build_summary_layout(merged)
-            return {"reply_text": reply, "intent": "confirm_order", "final_order_data": merged}
-
         if all_info_present:
-            return {"reply_text": self.build_summary_layout(merged), "intent": "confirm_order", "final_order_data": merged}
+            # Edit detection
+            if current_order.get("items") and cleaned_items != current_order.get("items"):
+                reply = "အော်ဒါကို ပြင်ဆင်ပြီးပါပြီ။\n\n" + self.build_summary_layout(merged)
+            else:
+                reply = self.build_summary_layout(merged)
+            
+            return {"reply_text": reply, "intent": "confirm_order", "final_order_data": merged}
         
         return {
             "reply_text": str(data.get("reply_text") or "ဆက်လက်မှာယူနိုင်ပါတယ်ခင်ဗျာ။").strip(),
@@ -103,10 +117,10 @@ Task: Extract order details accurately.
 
 🚨 RULES:
 1. Extract Name, Phone, Address, Payment, and Items.
-2. Even if user uses informal Burmese or mixed English, extract correctly.
-3. If info is missing, ask briefly in one sentence.
+2. IMPORTANT: Your JSON 'final_order_data' MUST include all fields from CURRENT STATE plus any new updates. DO NOT return empty strings for fields you already have in CURRENT STATE.
+3. If info is missing, ask briefly.
 
-CONTEXT: {json.dumps(current_order, ensure_ascii=False)}
+CONTEXT (CURRENT STATE): {json.dumps(current_order, ensure_ascii=False)}
 MENU: {json.dumps(menu, ensure_ascii=False)}
 
 OUTPUT JSON ONLY.
@@ -125,7 +139,6 @@ OUTPUT JSON ONLY.
                 "final_order_data": {"customer_name": "", "phone_no": "", "address": "", "payment_method": "", "items": []}
             }
 
-        # 🧠 AI CALL WITH RETRY PROTECTION
         for attempt in range(2):
             try:
                 res = await http_client.post(
@@ -134,7 +147,7 @@ OUTPUT JSON ONLY.
                     json={
                         "model": "llama-3.3-70b-versatile",
                         "messages": [
-                            {"role": "system", "content": "Return JSON only. Unicode Burmese only."},
+                            {"role": "system", "content": "Return JSON only. Unicode Burmese only. Be concise."},
                             {"role": "user", "content": f"{self.prompt(shop, menu, current_order)}\n\nUSER: {text}"}
                         ],
                         "temperature": 0,
@@ -155,7 +168,7 @@ OUTPUT JSON ONLY.
                 has_negative = any(w in clean_input for w in negative_words)
 
                 if result["intent"] == "confirm_order":
-                    # အချက်အလက်စုံပေမယ့် user က confirm မပြောသေးရင် ဒါမှမဟုတ် 'မှားနေတယ်' လို့ပြောရင် intent ကို ပြန်ချမယ်
+                    # အချက်အလက်စုံပေမယ့် user က confirm မပြောသေးရင် intent ကို info_gathering မှာပဲ ထားမယ်
                     if not is_confirm or has_negative:
                         result["intent"] = "info_gathering"
 
@@ -163,8 +176,7 @@ OUTPUT JSON ONLY.
 
             except Exception as e:
                 if attempt == 1:
-                    print("🔥 AI FINAL ERROR:", str(e))
-                    return {"reply_text": "လိုင်းမကောင်းလို့ ခဏနေမှ ပြန်ပြောပေးပါဦးခင်ဗျာ။", "intent": "info_gathering", "final_order_data": current_order}
+                    return {"reply_text": "ခဏနေမှ ပြန်ပြောပေးပါဦးခင်ဗျာ။", "intent": "info_gathering", "final_order_data": current_order}
                 await asyncio.sleep(1)
 
 ai = AI()
