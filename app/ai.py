@@ -1,15 +1,22 @@
-import os, json, httpx, re
+import os, json, httpx, re, asyncio
 
 http_client = httpx.AsyncClient(timeout=20.0)
 
 class AI:
+    # ✅ HELPERS FOR DATA INTEGRITY
+    def pick(self, new, old):
+        """AI က အသစ်ပေးတာရှိမှ ယူမယ်၊ မဟုတ်ရင် အဟောင်းကိုပဲ ဆက်ကိုင်ထားမယ် (Data Overwrite Protection)"""
+        if new is None: return old
+        if isinstance(new, str):
+            clean_new = new.strip()
+            return clean_new if clean_new != "" else old
+        return new if new != "" else old
+
     # ==========================================
-    # 🔥 BACKEND SUMMARY BUILDER (ADDED)
+    # 🔥 BACKEND SUMMARY BUILDER
     # ==========================================
     def build_summary_layout(self, order):
-        """AI ကို အားမကိုးဘဲ Backend ကနေ Summary Layout ကို တိုက်ရိုက်ထုတ်ပေးခြင်း"""
         item_lines = "\n".join([f"• {item['name']} x {item['qty']}" for item in order['items']])
-        
         return f"""📝 **အော်ဒါအနှစ်ချုပ်**
 ━━━━━━━━━━━━━━
 🛒 **မှာယူသည့်ပစ္စည်းများ:**
@@ -23,12 +30,14 @@ class AI:
 မှန်ကန်ပါက **Confirm** ဟု ရိုက်ပေးပါ။"""
 
     # ==========================================
-    # 🔥 SAFE_PARSE (FINAL PRODUCTION HARDENING)
+    # 🔥 SAFE_PARSE (PRODUCTION HARDENED)
     # ==========================================
     def safe_parse(self, text, current_order, menu):
         try:
-            text = re.sub(r"```json|```", "", text).strip()
-            data = json.loads(text)
+            # JSON extraction logic (Safer than direct loads)
+            match = re.search(r'\{.*?\}', text, re.DOTALL)
+            json_text = match.group() if match else text
+            data = json.loads(json_text)
         except Exception:
             return {
                 "reply_text": "အော်ဒါတင်ပေးဖို့အတွက် အမည်၊ ဖုန်းနံပါတ်၊ လိပ်စာလေး ပေးပေးပါခင်ဗျာ။",
@@ -37,147 +46,125 @@ class AI:
             }
 
         ai_data = data.get("final_order_data", {})
+        menu_map = {m["name"].lower(): m["name"] for m in menu}
 
-        raw_items = ai_data.get("items") or current_order.get("items", [])
+        # 🛒 ITEM MERGING & DELETION LOGIC
+        raw_items = ai_data.get("items")
         merged_items = {}
-        for item in raw_items:
-            name = str(item.get("name", "")).strip()
-            try:
+        if raw_items is not None:
+            for item in raw_items:
+                name = str(item.get("name", "")).strip().lower()
                 qty = max(1, int(item.get("qty", 1)))
-            except:
-                qty = 1
+                if name in menu_map:
+                    original_name = menu_map[name]
+                    merged_items[original_name] = merged_items.get(original_name, 0) + qty
+            cleaned_items = [{"name": k, "qty": v} for k, v in merged_items.items()]
+        else:
+            cleaned_items = current_order.get("items", [])
 
-            original_name = next((m["name"] for m in menu if m["name"].lower() == name.lower()), None)
-            if not original_name: continue
-
-            merged_items[original_name] = merged_items.get(original_name, 0) + qty
-
-        cleaned_items = [{"name": k, "qty": v} for k, v in merged_items.items()]
-
-        payment = str(ai_data.get("payment_method") or current_order.get("payment_method", "")).upper()
-        if any(x in payment for x in ["PRE", "KPAY", "WAVE", "PAYMENT"]):
+        # 💳 PAYMENT LOGIC
+        payment_raw = str(ai_data.get("payment_method") or "").upper()
+        if any(x in payment_raw for x in ["PRE", "KPAY", "WAVE"]):
             payment = "Prepaid"
-        elif any(x in payment for x in ["COD", "CASH", "အိမ်ရောက်", "လက်ငင်း"]):
+        elif any(x in payment_raw for x in ["COD", "CASH", "အိမ်ရောက်"]):
             payment = "COD (အိမ်ရောက်ငွေချေ)"
         else:
-            payment = "" 
+            payment = current_order.get("payment_method", "")
 
+        # 👤 DATA MERGE WITH OVERWRITE PROTECTION
         merged = {
-            "customer_name": str(ai_data.get("customer_name") or current_order.get("customer_name", "")),
-            "phone_no": str(ai_data.get("phone_no") or current_order.get("phone_no", "")),
-            "address": str(ai_data.get("address") or current_order.get("address", "")),
+            "customer_name": self.pick(ai_data.get("customer_name"), current_order.get("customer_name")),
+            "phone_no": self.pick(ai_data.get("phone_no"), current_order.get("phone_no")),
+            "address": self.pick(ai_data.get("address"), current_order.get("address")),
             "payment_method": payment,
             "items": cleaned_items
         }
 
-        # 🔥 FIXED LOGIC: အချက်အလက်စုံရင် Backend ကနေ Summary ကို အတင်းထုတ်မယ်
         all_info_present = all([merged["customer_name"], merged["phone_no"], merged["address"], merged["payment_method"], merged["items"]])
         
+        # ✨ EDIT DETECTION UX (အချက်အလက်စုံနေတုန်း ပစ္စည်းပြင်ရင် အသိပေးမယ်)
+        if all_info_present and current_order.get("items") and cleaned_items != current_order.get("items"):
+            reply = "အော်ဒါကို ပြင်ဆင်ပြီးပါပြီ။ ဆက်လက်စစ်ဆေးပေးပါ။\n\n" + self.build_summary_layout(merged)
+            return {"reply_text": reply, "intent": "confirm_order", "final_order_data": merged}
+
         if all_info_present:
-            intent = "confirm_order"
-            reply = self.build_summary_layout(merged) # AI ရဲ့ reply_text ကို Summary Layout နဲ့ override လုပ်မယ်
-        else:
-            intent = "info_gathering"
-            reply = str(data.get("reply_text") or "ဆက်လက်မှာယူနိုင်ပါတယ်ခင်ဗျာ။").strip()
+            return {"reply_text": self.build_summary_layout(merged), "intent": "confirm_order", "final_order_data": merged}
         
         return {
-            "reply_text": reply,
-            "intent": intent,
+            "reply_text": str(data.get("reply_text") or "ဆက်လက်မှာယူနိုင်ပါတယ်ခင်ဗျာ။").strip(),
+            "intent": "info_gathering",
             "final_order_data": merged
         }
 
-    # ==========================================
-    # 🎯 IMPROVED PROMPT (HARDENED FOR UNICODE & STABILITY)
-    # ==========================================
     def prompt(self, shop, menu, current_order):
         return f"""
-You are a PROFESSIONAL AI WAITER for {shop}. 
-Task: Extract order details (Items, Name, Phone, Address, Payment).
+You are a PROFESSIONAL AI WAITER for {shop}. Respond in UNICODE BURMESE.
+Task: Extract order details accurately.
 
-━━━━━━━━━━━━━━━━━━━━━━
-🚨 MANDATORY RULES (STRICT COMPLIANCE)
-━━━━━━━━━━━━━━━━━━━━━━
-1. LANGUAGE: Respond in UNICODE BURMESE only. 
-2. BE DIRECT: No extra greetings. If user says Hi/Hello, ask what they want to order.
-3. CONTEXT: Never ask for information that is already in CURRENT STATE.
-4. STEP 1 (Personal Info): Ask for Name, Phone, and Address in ONE sentence if missing.
-5. STEP 2 (Payment Inquiry): Once personal info is received, ask for payment method (COD or Prepaid).
-6. AUTOMATIC SUMMARY: Once you have Items, Name, Phone, Address, AND Payment, display the summary and set intent to 'confirm_order'.
+🚨 RULES:
+1. Extract Name, Phone, Address, Payment, and Items.
+2. Even if user uses informal Burmese or mixed English, extract correctly.
+3. If info is missing, ask briefly in one sentence.
 
-━━━━━━━━━━━━━━━━━━━━━━
-📋 ORDER SUMMARY LAYOUT (ONLY when all data is present)
-━━━━━━━━━━━━━━━━━━━━━━
-📝 **အော်ဒါအနှစ်ချုပ်**
-━━━━━━━━━━━━━━
-🛒 **မှာယူသည့်ပစ္စည်းများ:**
-• [Item Name] x [Qty]
-
-👤 **အမည်:** [Name]
-📞 **ဖုန်း:** [Phone]
-📍 **လိပ်စာ:** [Address]
-💳 **ငွေပေးချေမှု:** [COD (အိမ်ရောက်ငွေချေ) or Prepaid]
-━━━━━━━━━━━━━━
-မှန်ကန်ပါက **Confirm** ဟု ရိုက်ပေးပါ။
-
-━━━━━━━━━━━━━━━━━━━━━━
-📌 CONTEXT DATA
-━━━━━━━━━━━━━━━━━━━━━━
+CONTEXT: {json.dumps(current_order, ensure_ascii=False)}
 MENU: {json.dumps(menu, ensure_ascii=False)}
-CURRENT STATE: {json.dumps(current_order, ensure_ascii=False)}
 
-OUTPUT JSON ONLY:
-{{
-  "reply_text": "Direct response in Burmese",
-  "intent": "info_gathering OR confirm_order",
-  "final_order_data": {{ ... }}
-}}
+OUTPUT JSON ONLY.
 """
 
     async def process(self, text, shop, menu, current_order):
         clean_text = text.strip().lower()
+        clean_input = re.sub(r"[^\w\u1000-\u109F]+", "", clean_text)
         
-        if clean_text == "/start" or any(x == clean_text for x in ["hi", "hello", "ဟိုင်း", "မင်္ဂလာပါ"]):
-            blank_order = {"customer_name": "", "phone_no": "", "address": "", "payment_method": "", "items": []}
+        # 🔄 RESTART LOGIC
+        restart_words = ["ပြန်လုပ်", "restart", "cancel", "မလိုတော့", "အသစ်", "အစကနေ"]
+        if any(w in clean_input for w in restart_words) or clean_text == "/start":
             return {
                 "reply_text": f"မင်္ဂလာပါ! {shop} မှ ကြိုဆိုပါတယ်။ 🙏\nဒီနေ့ ဘာများ မှာယူမလဲခင်ဗျာ?",
                 "intent": "info_gathering",
-                "final_order_data": blank_order
+                "final_order_data": {"customer_name": "", "phone_no": "", "address": "", "payment_method": "", "items": []}
             }
 
-        prompt_text = self.prompt(shop, menu, current_order)
-        clean_input = re.sub(r"[^\w\u1000-\u109F]+", "", clean_text)
+        # 🧠 AI CALL WITH RETRY PROTECTION
+        for attempt in range(2):
+            try:
+                res = await http_client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [
+                            {"role": "system", "content": "Return JSON only. Unicode Burmese only."},
+                            {"role": "user", "content": f"{self.prompt(shop, menu, current_order)}\n\nUSER: {text}"}
+                        ],
+                        "temperature": 0,
+                        "response_format": {"type": "json_object"}
+                    }
+                )
 
-        try:
-            res = await http_client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY')}"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {"role": "system", "content": "Return JSON only. Burmese language only. No conversational filler."},
-                        {"role": "user", "content": f"{prompt_text}\n\nUSER: {text}"}
-                    ],
-                    "temperature": 0,
-                    "response_format": {"type": "json_object"}
-                }
-            )
+                if res.status_code != 200: raise Exception(res.text)
+                
+                content = res.json()["choices"][0]["message"]["content"]
+                result = self.safe_parse(content, current_order, menu)
 
-            if res.status_code != 200: raise Exception(res.text)
-            content = res.json()["choices"][0]["message"]["content"]
-            result = self.safe_parse(content, current_order, menu)
+                # ✅ SMART CONFIRM GUARD
+                confirm_words = ["confirm", "yes", "ok", "ဟုတ်", "မှန်ပါတယ်", "အိုကေ", "မှာမယ်", "အတည်ပြု"]
+                negative_words = ["မဟုတ်", "မှား", "ပြင်", "change", "wrong", "မမှန်"]
+                
+                is_confirm = any(w in clean_input for w in confirm_words)
+                has_negative = any(w in clean_input for w in negative_words)
 
-            confirm_words = ["confirm", "yes", "ok", "ဟုတ်", "မှန်ပါတယ်", "အိုကေ", "မှာမယ်", "အတည်ပြု"]
-            
-            # 🔥 Confirm logic check
-            if result["intent"] == "confirm_order":
-                if not any(w in clean_input for w in confirm_words):
-                    # Summary ပြထားပေမယ့် user က confirm မပြောသေးရင် intent ကို info_gathering မှာပဲထားမယ်
-                    result["intent"] = "info_gathering"
+                if result["intent"] == "confirm_order":
+                    # အချက်အလက်စုံပေမယ့် user က confirm မပြောသေးရင် ဒါမှမဟုတ် 'မှားနေတယ်' လို့ပြောရင် intent ကို ပြန်ချမယ်
+                    if not is_confirm or has_negative:
+                        result["intent"] = "info_gathering"
 
-            return result
+                return result
 
-        except Exception as e:
-            print("🔥 AI ERROR:", str(e))
-            return {"reply_text": "နားမလည်လိုက်လို့ တစ်ချက်ပြန်ပြောပေးပါဦးခင်ဗျာ။", "intent": "info_gathering", "final_order_data": current_order}
+            except Exception as e:
+                if attempt == 1:
+                    print("🔥 AI FINAL ERROR:", str(e))
+                    return {"reply_text": "လိုင်းမကောင်းလို့ ခဏနေမှ ပြန်ပြောပေးပါဦးခင်ဗျာ။", "intent": "info_gathering", "final_order_data": current_order}
+                await asyncio.sleep(1)
 
 ai = AI()
