@@ -4,6 +4,25 @@ http_client = httpx.AsyncClient(timeout=20.0)
 
 class AI:
     # ==========================================
+    # 🔥 BACKEND SUMMARY BUILDER (ADDED)
+    # ==========================================
+    def build_summary_layout(self, order):
+        """AI ကို အားမကိုးဘဲ Backend ကနေ Summary Layout ကို တိုက်ရိုက်ထုတ်ပေးခြင်း"""
+        item_lines = "\n".join([f"• {item['name']} x {item['qty']}" for item in order['items']])
+        
+        return f"""📝 **အော်ဒါအနှစ်ချုပ်**
+━━━━━━━━━━━━━━
+🛒 **မှာယူသည့်ပစ္စည်းများ:**
+{item_lines}
+
+👤 **အမည်:** {order['customer_name']}
+📞 **ဖုန်း:** {order['phone_no']}
+📍 **လိပ်စာ:** {order['address']}
+💳 **ငွေပေးချေမှု:** {order['payment_method']}
+━━━━━━━━━━━━━━
+မှန်ကန်ပါက **Confirm** ဟု ရိုက်ပေးပါ။"""
+
+    # ==========================================
     # 🔥 SAFE_PARSE (FINAL PRODUCTION HARDENING)
     # ==========================================
     def safe_parse(self, text, current_order, menu):
@@ -51,15 +70,15 @@ class AI:
             "items": cleaned_items
         }
 
-        intent = data.get("intent", "info_gathering")
+        # 🔥 FIXED LOGIC: အချက်အလက်စုံရင် Backend ကနေ Summary ကို အတင်းထုတ်မယ်
+        all_info_present = all([merged["customer_name"], merged["phone_no"], merged["address"], merged["payment_method"], merged["items"]])
         
-        # 🔥 Validation Guard: အချက်အလက်စုံမှသာ Confirm ပေးလုပ်မယ်
-        if all([merged["customer_name"], merged["phone_no"], merged["address"], merged["payment_method"], merged["items"]]):
-            pass # Keep AI intent if already confirm_order
+        if all_info_present:
+            intent = "confirm_order"
+            reply = self.build_summary_layout(merged) # AI ရဲ့ reply_text ကို Summary Layout နဲ့ override လုပ်မယ်
         else:
             intent = "info_gathering"
-
-        reply = str(data.get("reply_text") or "ဆက်လက်မှာယူနိုင်ပါတယ်ခင်ဗျာ။").strip()
+            reply = str(data.get("reply_text") or "ဆက်လက်မှာယူနိုင်ပါတယ်ခင်ဗျာ။").strip()
         
         return {
             "reply_text": reply,
@@ -83,7 +102,7 @@ Task: Extract order details (Items, Name, Phone, Address, Payment).
 3. CONTEXT: Never ask for information that is already in CURRENT STATE.
 4. STEP 1 (Personal Info): Ask for Name, Phone, and Address in ONE sentence if missing.
 5. STEP 2 (Payment Inquiry): Once personal info is received, ask for payment method (COD or Prepaid).
-6. AUTOMATIC SUMMARY: Once you have Items, Name, Phone, Address, AND Payment, show the summary and set intent to 'confirm_order'.
+6. AUTOMATIC SUMMARY: Once you have Items, Name, Phone, Address, AND Payment, display the summary and set intent to 'confirm_order'.
 
 ━━━━━━━━━━━━━━━━━━━━━━
 📋 ORDER SUMMARY LAYOUT (ONLY when all data is present)
@@ -135,7 +154,7 @@ OUTPUT JSON ONLY:
                 json={
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
-                        {"role": "system", "content": "Return JSON. No conversational filler. Burmese only."},
+                        {"role": "system", "content": "Return JSON only. Burmese language only. No conversational filler."},
                         {"role": "user", "content": f"{prompt_text}\n\nUSER: {text}"}
                     ],
                     "temperature": 0,
@@ -152,7 +171,7 @@ OUTPUT JSON ONLY:
             # 🔥 Confirm logic check
             if result["intent"] == "confirm_order":
                 if not any(w in clean_input for w in confirm_words):
-                    # Summary ပြထားပြီးသားဖြစ်ပေမယ့် user က confirm မလုပ်သေးရင် Gathering အဖြစ်ပဲထားမယ်
+                    # Summary ပြထားပေမယ့် user က confirm မပြောသေးရင် intent ကို info_gathering မှာပဲထားမယ်
                     result["intent"] = "info_gathering"
 
             return result
