@@ -17,3 +17,5 @@ cryptography
 
 # --- Utilities ---
 pydantic
+
+python-telegram-bot
