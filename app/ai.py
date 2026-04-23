@@ -27,15 +27,17 @@ class AI:
 ━━━━━━━━━━━━━━
 မှန်ကန်ပါက **Confirm** နှိပ်ပေးပါ။ ပြင်ချင်တာရှိပါကလည်း ပြောနိုင်ပါတယ်ခင်ဗျာ။"""
 
-    # ✅ SAFE_PARSE WITH ADVANCED EDIT LOGIC
+    # ✅ SAFE_PARSE (Improved Error Handling & JSON Extraction)
     def safe_parse(self, content, current_order, menu, user_input):
         try:
-            match = re.search(r'\{.*?\}', content, re.DOTALL)
+            # AI က စာတွေရောပေးလာရင် JSON အပိုင်းကိုပဲ ဆွဲထုတ်မယ်
+            match = re.search(r'\{.*\}', content, re.DOTALL)
             json_text = match.group() if match else content
             data = json.loads(json_text)
         except Exception:
+            # Parse မရရင် User ကို နားလည်အောင် ပြန်မေးမယ်
             return {
-                "reply_text": "နားမလည်လိုက်လို့ ပြန်ပြောပေးပါဦးခင်ဗျာ။", 
+                "reply_text": "နားမလည်လိုက်လို့ ပစ္စည်းအမည်နဲ့ အရေအတွက်ကို သေချာလေး ပြန်ပြောပေးပါဦးခင်ဗျာ။", 
                 "intent": "info_gathering", 
                 "final_order_data": current_order
             }
@@ -77,25 +79,25 @@ class AI:
             "items": cleaned_items
         }
 
-        return {"final_order_data": merged, "reply_text": data.get("reply_text")}
+        return {"final_order_data": merged, "reply_text": data.get("reply_text", "ဟုတ်ကဲ့ခင်ဗျာ၊ ဘာများ ထပ်ယူမလဲခင်ဗျာ။")}
 
     def prompt(self, shop, menu, current_order):
+        # AI ကို JSON Format အတိအကျပေးဖို့ ပိုပြီး တိတိကျကျ ခိုင်းထားပါတယ်
         return f"""
 You are a PROFESSIONAL AI WAITER for {shop}. Respond in UNICODE BURMESE.
 Extract: Name, Phone, Address, Payment, Items.
 If user wants to CHANGE/REPLACE/REMOVE an item, update the 'items' list accordingly.
 CONTEXT: {json.dumps(current_order, ensure_ascii=False)}
 MENU: {json.dumps(menu, ensure_ascii=False)}
-Return JSON with 'reply_text' and 'final_order_data'.
+Return ONLY a valid JSON object with 'reply_text' and 'final_order_data'.
 """
 
     async def process(self, text, shop, menu, current_order):
         clean_text = text.strip().lower()
         clean_input = re.sub(r"[^\w\u1000-\u109F]+", "", clean_text)
         
-        # 🔄 RESTART & GREETING LOGIC (Added hi, hello, မင်္ဂလာပါ)
+        # 🔄 RESTART & GREETING LOGIC
         greetings = ["hi", "hello", "hey", "မင်္ဂလာပါ", "ဟိုင်း", "ဟယ်လို", "start", "/start", "restart", "ပြန်လုပ်"]
-        # စာသားအတိအကျတူရင် သို့မဟုတ် regex ရှင်းထုတ်ထားတဲ့ စာသားတူရင် Welcome ပြမယ်
         is_greeting = any(clean_text == g for g in greetings) or any(clean_input == g for g in greetings)
 
         if is_greeting:
@@ -106,7 +108,7 @@ Return JSON with 'reply_text' and 'final_order_data'.
                 "ui": "main_menu"
             }
 
-        # ✅ REVIEW STATE GATEKEEPER (Pre-AI Check)
+        # ✅ REVIEW STATE GATEKEEPER
         is_ready = all([
             current_order.get("customer_name"),
             current_order.get("phone_no"),
@@ -123,7 +125,6 @@ Return JSON with 'reply_text' and 'final_order_data'.
             is_edit_intent = any(w in clean_text for w in edit_words)
             mentions_menu = any(m["name"].lower() in clean_text for m in menu)
 
-            # Confirm Case
             if is_confirm and not mentions_menu:
                 return {
                     "reply_text": "အော်ဒါကို အတည်ပြုလိုက်ပါပြီ။ ကျေးဇူးတင်ပါတယ်! 🙏",
@@ -131,7 +132,6 @@ Return JSON with 'reply_text' and 'final_order_data'.
                     "final_order_data": current_order
                 }
 
-            # If user is NOT editing and NOT mentioning menu → Keep Summary
             if not is_edit_intent and not mentions_menu:
                 return {
                     "reply_text": self.build_summary_layout(current_order),
@@ -158,7 +158,6 @@ Return JSON with 'reply_text' and 'final_order_data'.
                 parse_result = self.safe_parse(content, current_order, menu, text)
                 updated_order = parse_result["final_order_data"]
 
-                # Post-AI Readiness Check
                 is_now_ready = all([
                     updated_order.get("customer_name"),
                     updated_order.get("phone_no"),
@@ -175,7 +174,6 @@ Return JSON with 'reply_text' and 'final_order_data'.
                         "ui": "confirm_buttons"
                     }
 
-                # If still gathering info
                 return {
                     "reply_text": parse_result["reply_text"],
                     "intent": "info_gathering",
@@ -184,7 +182,7 @@ Return JSON with 'reply_text' and 'final_order_data'.
 
             except Exception:
                 if attempt == 1:
-                    return {"reply_text": "ခဏနေမှ ပြန်ပြောပေးပါဦး။", "intent": "info_gathering", "final_order_data": current_order}
+                    return {"reply_text": "စနစ်အနည်းငယ် အလုပ်များနေလို့ ခဏနေမှ ပြန်ပြောပေးပါဦး။", "intent": "info_gathering", "final_order_data": current_order}
                 await asyncio.sleep(1)
 
 ai = AI()
