@@ -43,7 +43,6 @@ class AI:
         ai_data = data.get("final_order_data", {})
         
         # 🛒 SMART ITEM EDIT/REPLACE DETECTION
-        # User input ထဲမှာ ပြင်ချင်တဲ့ အရိပ်အယောင်ပါသလား စစ်မယ်
         edit_triggers = ["မဟုတ်", "မယူ", "မသောက်", "ပြင်", "change", "replace", "remove", "အစား", "ဖြုတ်"]
         is_edit_mode = any(word in user_input.lower() for word in edit_triggers)
         
@@ -52,7 +51,6 @@ class AI:
 
         if raw_items:
             if is_edit_mode:
-                # Edit mode ဆိုရင် AI ပေးတဲ့ ပစ္စည်းအသစ်တွေနဲ့ပဲ အစားထိုးမယ်
                 new_list = {}
                 for item in raw_items:
                     name_raw = str(item.get("name", "")).strip().lower()
@@ -62,7 +60,6 @@ class AI:
                 if new_list:
                     merged_items = new_list
             else:
-                # Normal mode: ရှိပြီးသားထဲကို ပေါင်းမယ် (သို့) Qty update လုပ်မယ်
                 for item in raw_items:
                     name_raw = str(item.get("name", "")).strip().lower()
                     original_name = next((m["name"] for m in menu if m["name"].lower() == name_raw), None)
@@ -96,8 +93,12 @@ Return JSON with 'reply_text' and 'final_order_data'.
         clean_text = text.strip().lower()
         clean_input = re.sub(r"[^\w\u1000-\u109F]+", "", clean_text)
         
-        # 🔄 RESTART LOGIC
-        if any(w in clean_input for w in ["restart", "ပြန်လုပ်", "/start"]):
+        # 🔄 RESTART & GREETING LOGIC (Added hi, hello, မင်္ဂလာပါ)
+        greetings = ["hi", "hello", "hey", "မင်္ဂလာပါ", "ဟိုင်း", "ဟယ်လို", "start", "/start", "restart", "ပြန်လုပ်"]
+        # စာသားအတိအကျတူရင် သို့မဟုတ် regex ရှင်းထုတ်ထားတဲ့ စာသားတူရင် Welcome ပြမယ်
+        is_greeting = any(clean_text == g for g in greetings) or any(clean_input == g for g in greetings)
+
+        if is_greeting:
             return {
                 "reply_text": f"မင်္ဂလာပါ! {shop} မှ ကြိုဆိုပါတယ်။ 🙏\nဒီနေ့ ဘာများ မှာယူမလဲခင်ဗျာ?",
                 "intent": "info_gathering",
