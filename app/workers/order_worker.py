@@ -1,10 +1,11 @@
 import asyncio
 import logging
+import json # <--- JSON format ပြောင်းဖို့ ထည့်ထားတယ်
 from app.db.database import get_db_pool
 from app.services.ai import ai
 from app.services.telegram import send
 
-# Logging config ပိုကောင်းအောင် ပြင်ထားတယ်
+# Logging config
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -18,7 +19,7 @@ async def run_worker():
         try:
             async with pool.acquire() as conn:
 
-                # 🔄 Get task safely (Skip Locked ကြောင့် worker အများကြီး run လို့ရတယ်)
+                # 🔄 Task ကို Safe ဖြစ်အောင် ယူမယ်
                 task = await conn.fetchrow("""
                 UPDATE task_queue SET status='processing'
                 WHERE id = (
@@ -32,12 +33,12 @@ async def run_worker():
                 """)
 
                 if not task:
-                    await asyncio.sleep(1) # task မရှိရင် ၁ စက္ကန့် စောင့်မယ်
+                    await asyncio.sleep(1)
                     continue
 
                 logging.info(f"📩 Processing task {task['id']} for Shop ID: {task['business_id']}")
 
-                # 📦 Load business details (Dynamic Token အတွက်)
+                # 📦 ဆိုင်ရဲ့ အချက်အလက် (Token) ကို ယူမယ်
                 biz = await conn.fetchrow(
                     "SELECT id, name, tg_bot_token FROM businesses WHERE id=$1",
                     task["business_id"]
@@ -48,22 +49,25 @@ async def run_worker():
                     await conn.execute("DELETE FROM task_queue WHERE id=$1", task["id"])
                     continue
 
-                # 📜 Load menu (SaaS context)
+                # 📜 Menu ကို ယူမယ်
                 menu_rows = await conn.fetch(
                     "SELECT name, price FROM products WHERE business_id=$1",
                     task["business_id"]
                 )
                 menu = [dict(m) for m in menu_rows]
 
-                # 🧠 Load previous order (JSONB ကြောင့် json.loads မလိုတော့ပါ)
+                # 🧠 ယခင်မှာထားတဲ့ အချက်အလက် (Memory) ကို ယူမယ်
                 pending = await conn.fetchrow(
                     "SELECT order_data FROM pending_orders WHERE chat_id=$1 AND business_id=$2",
                     task["chat_id"], task["business_id"]
                 )
 
+                # Database က JSONB ဆိုရင် dict အဖြစ်လာမယ်၊ TEXT ဆိုရင် string လာမယ်
                 current = pending["order_data"] if pending else {"items": []}
+                if isinstance(current, str):
+                    current = json.loads(current)
 
-                # 🤖 AI Processing (Original Strong Logic)
+                # 🤖 AI နဲ့ အဖြေထုတ်မယ်
                 res = await ai.process(
                     task["user_text"],
                     biz["name"],
@@ -73,15 +77,19 @@ async def run_worker():
 
                 final_data = res.get("final_order_data", {})
 
-                # 💾 Save memory (JSONB ကြောင့် dict ကို တိုက်ရိုက်သိမ်းတယ်)
+                # 💾 Memory သိမ်းမယ် (Error မတက်အောင် json.dumps သုံးထားတယ်)
+                # ဒါဆိုရင် Table column က TEXT ရော JSONB ပါ အဆင်ပြေပါတယ်
                 await conn.execute("""
                 INSERT INTO pending_orders (chat_id, business_id, order_data)
                 VALUES ($1, $2, $3)
                 ON CONFLICT (chat_id, business_id)
                 DO UPDATE SET order_data=$3, updated_at=NOW()
-                """, task["chat_id"], task["business_id"], final_data)
+                """, 
+                task["chat_id"], 
+                task["business_id"], 
+                json.dumps(final_data)) # <--- ဒီနေရာက အဓိက အဖြေပါပဲ
 
-                # 🎛 UI Buttons logic
+                # 🎛 UI Buttons
                 markup = None
                 if res.get("ui") == "confirm_buttons":
                     markup = {
@@ -91,20 +99,20 @@ async def run_worker():
                         ]]
                     }
 
-                # 📤 Send message (Using Dynamic Token from DB)
+                # 📤 Telegram ဆီ Reply ပြန်ပို့မယ်
                 await send(
-                    biz["tg_bot_token"], # <-- ဒါက အဓိကပဲ
+                    biz["tg_bot_token"],
                     task["chat_id"],
                     res.get("reply_text", "နားမလည်ပါဘူးခင်ဗျာ။"),
                     reply_markup=markup
                 )
 
-                # 🧹 Cleanup task from queue
+                # 🧹 Task ကို Queue ထဲက ဖျက်မယ်
                 await conn.execute("DELETE FROM task_queue WHERE id=$1", task["id"])
                 logging.info(f"✅ Task {task['id']} completed successfully.")
 
         except Exception as e:
             logging.error(f"🔥 Worker Error: {str(e)}")
-            await asyncio.sleep(2) # Error တက်ရင် ၂ စက္ကန့် နားပြီးမှ ပြန်စမယ်
+            await asyncio.sleep(2)
 
-        await asyncio.sleep(0.1) # Loop ပတ်တာ အရမ်းမမြန်အောင် ခဏထိန်းတယ်
+        await asyncio.sleep(0.1)
