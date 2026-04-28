@@ -1,6 +1,7 @@
 # --- Core Web Framework ---
 fastapi
 uvicorn[standard]
+gunicorn  # Production server (Render/Railway မှာ လိုအပ်တယ်)
 
 # --- AI & HTTP Clients ---
 google-genai
@@ -17,5 +18,9 @@ cryptography
 
 # --- Utilities ---
 pydantic
-
 python-telegram-bot
+
+# --- Additional Essentials for Production ---
+psycopg2-binary  # Database management utilities အတွက်
+python-multipart  # Webhook ကနေ file/form data လက်ခံဖို့လိုအပ်ရင်သုံးရတယ်
+certifi          # SSL/TLS ချိတ်ဆက်မှုတွေ လုံခြုံဖို့
