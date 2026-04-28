@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import httpx  # ✅ answerCallbackQuery ပို့ဖို့ httpx လိုပါတယ်
 from fastapi import APIRouter, Request, Header, HTTPException
 from app.db.database import get_db_pool
 
@@ -11,9 +12,19 @@ async def webhook(token: str, request: Request):
         data = await request.json()
         pool = await get_db_pool()
 
-        # 1. Callback Query (Buttons) ကို ပုံမှန် Message အဖြစ် ပြောင်းပေးမယ်
+        # 1. Callback Query (Buttons) Logic
         if "callback_query" in data:
             cb = data["callback_query"]
+            callback_id = cb["id"]  # ✅ Callback Query ရဲ့ ID ကို ယူမယ်
+
+            # 🚨 ချက်ချင်း Telegram ဆီ answerCallbackQuery ပြန်ပို့ပါ (Loop ပိတ်ဖို့)
+            # ဒါမှ "အော်ဒါအတည်ပြုလိုက်ပါပြီ" ဆိုတဲ့စာကြီး တန်းစီတက်မလာတော့မှာပါ
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{token}/answerCallbackQuery",
+                    json={"callback_query_id": callback_id}
+                )
+
             # Button နှိပ်တဲ့အခါ message ထဲမှာ text အစား callback data ဝင်သွားအောင် လုပ်တာပါ
             data["message"] = {
                 "chat": {"id": cb["message"]["chat"]["id"]},
@@ -29,7 +40,7 @@ async def webhook(token: str, request: Request):
         user_text = msg["text"]
 
         async with pool.acquire() as conn:
-            # 2. Token နဲ့ ဆိုင်ရှိမရှိ စစ်မယ် (SaaS Security)
+            # 2. Token စစ်ဆေးခြင်း
             biz = await conn.fetchrow(
                 "SELECT id FROM businesses WHERE tg_bot_token=$1", 
                 token
@@ -39,12 +50,10 @@ async def webhook(token: str, request: Request):
                 logging.warning(f"🚫 Unauthorized token attempt: {token[:10]}...")
                 return {"ok": False}
 
-            # 3. Idempotency Check (Request တစ်ခုကို နှစ်ခါမလုပ်မိအောင်)
-            # chat_id နဲ့ text ကို hash လုပ်ပြီး unique key ထုတ်တယ်
+            # 3. Idempotency Check (Duplicate ကာကွယ်ရန်)
             h = hashlib.md5(f"{chat_id}{user_text}".encode()).hexdigest()
 
             # 4. Task Queue ထဲ ထည့်မယ်
-            # ON CONFLICT DO NOTHING ကြောင့် Telegram က duplicate လွှတ်ရင်လည်း DB မှာ တစ်ခါပဲဝင်မယ်
             await conn.execute("""
                 INSERT INTO task_queue (business_id, chat_id, user_text, request_hash, status)
                 VALUES ($1, $2, $3, $4, 'pending')
@@ -55,10 +64,9 @@ async def webhook(token: str, request: Request):
 
     except Exception as e:
         logging.error(f"🔥 Webhook Error: {str(e)}")
-        # Telegram ဆီကို 200 OK ပဲ ပြန်ပေးသင့်တယ် (မပြရင် သူက ခဏခဏ ပြန်ပို့နေမှာမို့လို့)
         return {"ok": True}
 
-# 🛠️ Optional: ဆိုင်ရှင်အသစ်တွေ Bot လာချိတ်ဖို့ API (SaaS Onboarding)
+# 🛠️ Register Bot API
 @router.post("/register-bot")
 async def register_bot(token: str, name: str):
     pool = await get_db_pool()
